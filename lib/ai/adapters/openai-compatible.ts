@@ -16,6 +16,10 @@ function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
 }
 
+function modalityTextOf(modalities?: string[]) {
+  return (modalities ?? []).join(" ");
+}
+
 function hasOpenAiVersionSuffix(baseUrl: string) {
   return /\/v\d+(?:beta)?$/i.test(normalizeBaseUrl(baseUrl));
 }
@@ -976,17 +980,34 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const payload = await this.requestJson<{ data?: Array<Record<string, unknown> & { id: string; label?: string; name?: string }> }>("/models", {
       method: "GET",
     });
-    return (payload.data ?? []).map((item) => ({
-      id: item.id,
-      label: item.label ?? item.name ?? item.id,
-      type: typeof item.type === "string" ? item.type : typeof item.category === "string" ? item.category : null,
-      category: typeof item.category === "string" ? item.category : typeof item.type === "string" ? item.type : null,
-      modalities: Array.isArray(item.modalities)
-        ? item.modalities.filter((entry): entry is string => typeof entry === "string")
-        : Array.isArray(item.capabilities)
-          ? item.capabilities.filter((entry): entry is string => typeof entry === "string")
-          : undefined,
-    }));
+    return (payload.data ?? []).map((item) => {
+      const endpointTypes = Array.isArray(item.supported_endpoint_types)
+        ? item.supported_endpoint_types.filter((entry): entry is string => typeof entry === "string")
+        : undefined;
+
+      const declaredType =
+        typeof item.type === "string" ? item.type : typeof item.category === "string" ? item.category : null;
+
+      const modalities =
+        Array.isArray(item.modalities)
+          ? item.modalities.filter((entry): entry is string => typeof entry === "string")
+          : Array.isArray(item.capabilities)
+            ? item.capabilities.filter((entry): entry is string => typeof entry === "string")
+            : undefined;
+
+      // 保留上游声明的端点类型，用于功能区精准匹配（如 image-generation / openai-video / gemini）
+      const type = [declaredType, ...(endpointTypes ?? []), modalityTextOf(modalities)].filter(Boolean).join(" ") || null;
+
+      return {
+        id: item.id,
+        label: item.label ?? item.name ?? item.id,
+        type,
+        category: declaredType ?? endpointTypes?.[0] ?? null,
+        modalities,
+        endpointTypes,
+        ownedBy: typeof item.owned_by === "string" ? item.owned_by : null,
+      };
+    });
   }
 
   async generateText(input: TextRequest) {

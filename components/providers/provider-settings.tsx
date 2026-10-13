@@ -76,16 +76,7 @@ const modelTypeFields: Array<{ key: ModelTypeKey; label: string }> = [
   { key: "image_edit", label: "图像编辑模型" },
 ];
 
-const preferredGptTextModelIds = [
-  "gpt-6-luna",
-  "gpt-5-mini",
-  "gpt-5-nano",
-  "gpt-4.1-mini",
-  "gpt-4.1-nano",
-  "gpt-4o-mini",
-  "gpt-4o",
-  "gpt-4.1",
-];
+const preferredGptTextModelIds: string[] = [];
 
 function normalizeModelId(modelId: string) {
   return modelId.toLowerCase().replace(/[^a-z0-9.]+/g, "");
@@ -137,14 +128,17 @@ function uniqueModels(models: GenericModelRecord[]) {
 
 function isPreferredGptTextModel(model: GenericModelRecord) {
   const normalized = normalizeModelId(String(model.modelId ?? model.label ?? ""));
-  return preferredGptTextModelIds.map(normalizeModelId).includes(normalized);
+  if (preferredGptTextModelIds.map(normalizeModelId).includes(normalized)) return true;
+  // 旗舰档优先（sol / astra / pro / max），与后端推荐逻辑保持一致
+  return /(sol|astra|opus|ultra|pro|max|high)/i.test(String(model.modelId ?? model.label ?? ""));
 }
 
 function isPreferredGptImage2(model: GenericModelRecord) {
-  if (["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"].includes(String(model.modelId))) return true;
   const modelId = String(model.modelId ?? model.label ?? "");
-  const normalized = normalizeModelId(modelId);
-  return normalized === "gptimage2" || /^gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(modelId);
+  if (/gpt[-_\s]?image[-_\s]?2\.5/i.test(modelId)) return true;
+  if (/gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(modelId)) return true;
+  // 中转站常见的 Google 图像系列与 grok 图像模型
+  return /(nano[-_\s]?banana|banana|grok[-_\s]?imagine)/i.test(modelId);
 }
 
 function canUseForModelType(model: GenericModelRecord, typeKey: ModelTypeKey) {
@@ -157,15 +151,30 @@ function canUseForModelType(model: GenericModelRecord, typeKey: ModelTypeKey) {
 function scoreModelForType(model: GenericModelRecord, typeKey: ModelTypeKey) {
   let score = 0;
   const text = getModelText(model);
-  if ((typeKey === "text" || typeKey === "vision") && model.modelId === "gpt-6-luna") score += 1000;
-  if ((typeKey === "image_gen" || typeKey === "image_edit") && model.modelId === "gpt-image-2.5-sunburst") score += 1000;
-  if ((typeKey === "image_gen" || typeKey === "image_edit") && model.modelId === "gpt-image-2.5-flare") score += 900;
-  if ((typeKey === "text" || typeKey === "vision") && isPreferredGptTextModel(model)) score += 100;
-  if ((typeKey === "image_gen" || typeKey === "image_edit") && isPreferredGptImage2(model)) score += 100;
-  if (/gpt/i.test(text)) score += 20;
+  const modelId = String(model.modelId ?? model.label ?? "");
+
+  if (typeKey === "image_gen" || typeKey === "image_edit") {
+    if (/gpt[-_\s]?image[-_\s]?2\.5/i.test(modelId)) score += 1000;
+    else if (/gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(modelId)) score += 900;
+    else if (/gpt[-_\s]?image/i.test(modelId)) score += 700;
+    else if (/(nano[-_\s]?banana|banana)/i.test(modelId)) score += 600;
+    else if (/grok[-_\s]?imagine/i.test(modelId)) score += 500;
+    if (/sunburst/i.test(modelId)) score += 60;
+    if (/flare/i.test(modelId)) score += 40;
+    if (/pro(?:[-_\s]|$)/i.test(modelId)) score += 30;
+    if (/-cf(?:[-_]|$)/i.test(modelId)) score -= 80;
+  } else {
+    // 文本 / 图像识别：旗舰档优先
+    if (/(^|[-_])(sol|astra|opus|ultra)([-_]|$)/i.test(modelId)) score += 500;
+    if (/(pro|max|high)(?:[-_]|$)/i.test(modelId)) score += 300;
+    if (isPreferredGptTextModel(model)) score += 200;
+    const generation = modelId.match(/(?:gpt|gemini|glm|qwen)[-_]?(\d+(?:\.\d+)?)/i);
+    if (generation) score += Math.min(parseFloat(generation[1]), 9) * 5;
+  }
+
   if (/(mini|nano|lite|turbo|flash)/i.test(text)) score += 8;
   if (/(preview|experimental|beta|test|deprecated|legacy)/i.test(text)) score -= 10;
-  if (/gpt[-_\s]?5\.5|pro|max|ultra/i.test(text) && (typeKey === "text" || typeKey === "vision")) score -= 20;
+  if (/pack(?:[-_]|$)/i.test(modelId)) score -= 100;
   return score;
 }
 

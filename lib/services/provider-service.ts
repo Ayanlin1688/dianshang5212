@@ -73,31 +73,9 @@ type DiscoveredProviderModel = {
   type?: string | null;
   category?: string | null;
   modalities?: string[];
+  endpointTypes?: string[];
+  ownedBy?: string | null;
 };
-
-const OPENAI_TEXT_MODEL_PRESETS: DiscoveredProviderModel[] = [
-  { id: "gpt-6-luna", label: "gpt-6-luna", type: "text", category: "chat", modalities: ["text", "vision"] },
-  { id: "gpt-5-mini", label: "gpt-5-mini", type: "text", category: "chat" },
-  { id: "gpt-5-nano", label: "gpt-5-nano", type: "text", category: "chat" },
-  { id: "gpt-4.1-mini", label: "gpt-4.1-mini", type: "text", category: "chat" },
-  { id: "gpt-4.1-nano", label: "gpt-4.1-nano", type: "text", category: "chat" },
-  { id: "gpt-4o-mini", label: "gpt-4o-mini", type: "text", category: "chat" },
-  { id: "gpt-4o", label: "gpt-4o", type: "text", category: "chat", modalities: ["text", "vision"] },
-  { id: "gpt-4.1", label: "gpt-4.1", type: "text", category: "chat", modalities: ["text", "vision"] },
-];
-
-const OPENAI_IMAGE_MODEL_PRESETS: DiscoveredProviderModel[] = [
-  { id: "gpt-image-2.5-sunburst", label: "gpt-image-2.5-sunburst", type: "image", category: "image" },
-  { id: "gpt-image-2.5-flare", label: "gpt-image-2.5-flare", type: "image", category: "image" },
-  { id: "gpt-image-2-2026-04-21", label: "gpt-image-2-2026-04-21", type: "image", category: "image" },
-  { id: "gpt-image-2", label: "gpt-image-2", type: "image", category: "image" },
-  { id: "gpt-image-1.5", label: "gpt-image-1.5", type: "image", category: "image" },
-  { id: "gpt-image-1.5-2025-12-16", label: "gpt-image-1.5-2025-12-16", type: "image", category: "image" },
-  { id: "gpt-image-1-mini", label: "gpt-image-1-mini", type: "image", category: "image" },
-  { id: "gpt-image-1", label: "gpt-image-1", type: "image", category: "image" },
-  { id: "dall-e-3", label: "dall-e-3", type: "image", category: "image" },
-  { id: "dall-e-2", label: "dall-e-2", type: "image", category: "image" },
-];
 
 function maskApiKey(apiKey: string) {
   const trimmed = apiKey.trim();
@@ -123,64 +101,10 @@ function hydrateProviderModels<T extends { capabilities: any }>(models: T[]) {
   }));
 }
 
-function shouldIncludeOpenAiImagePresets(baseUrl: string, models: Array<{ modelId?: string; id?: string }>) {
-  const text = `${baseUrl} ${models.map((model) => model.modelId ?? model.id ?? "").join(" ")}`.toLowerCase();
-  return /openai|chatgpt|gpt-|(^|[^a-z])o[1345](?:[^a-z]|$)|dall[-_\s]?e/.test(text);
-}
-
-function mergeDiscoveredModels(baseUrl: string, models: DiscoveredProviderModel[]) {
-  if (!shouldIncludeOpenAiImagePresets(baseUrl, models)) {
-    return models;
-  }
-
-  const seen = new Set(models.map((model) => model.id.toLowerCase()));
-  const presets = [...OPENAI_TEXT_MODEL_PRESETS, ...OPENAI_IMAGE_MODEL_PRESETS];
-  const missingPresets = presets.filter((model) => !seen.has(model.id.toLowerCase()));
-  return [...models, ...missingPresets];
-}
-
-function mergeHydratedProviderModels<T extends RuntimeProviderModel>(
-  providerId: string,
-  baseUrl: string,
-  models: T[],
-) {
-  if (!shouldIncludeOpenAiImagePresets(baseUrl, models)) {
-    return models;
-  }
-
-  const seen = new Set(models.map((model) => model.modelId.toLowerCase()));
-  const missingPresets = [...OPENAI_TEXT_MODEL_PRESETS, ...OPENAI_IMAGE_MODEL_PRESETS].filter((model) => !seen.has(model.id.toLowerCase()));
-  if (missingPresets.length === 0) {
-    return models;
-  }
-
-  const now = new Date();
-  const supplemental = enrichModelEndpointSupport(normalizeDetectedModels(missingPresets)).map((model) => ({
-    id: `${providerId}:preset:${model.modelId}`,
-    providerConfigId: providerId,
-    modelId: model.modelId,
-    label: model.label,
-    capabilities: model.capabilities as Record<string, unknown>,
-    roles: model.roles as Record<string, unknown>,
-    quality: model.quality ?? null,
-    latency: model.latency ?? null,
-    cost: model.cost ?? null,
-    isAvailable: model.isAvailable,
-    isDefaultAnalysis: false,
-    isDefaultPlanning: false,
-    isDefaultHeroImage: false,
-    isDefaultDetailImage: false,
-    isDefaultImageEdit: false,
-    createdAt: now,
-    updatedAt: now,
-    endpointSupport: model.endpointSupport ?? {
-      imageGeneration: "unknown",
-      imageEdit: "unknown",
-      note: PASSIVE_IMAGE_CAPABILITY_NOTE,
-    },
-  })) as T[];
-
-  return [...models, ...supplemental];
+// 只使用中转站真实返回的上游模型，不再合并任何本地预设模型
+// （避免出现中转站并不存在的 gpt-4o / dall-e 等模型被选中导致调用失败）
+function mergeDiscoveredModels(_baseUrl: string, models: DiscoveredProviderModel[]) {
+  return models;
 }
 
 const PASSIVE_IMAGE_CAPABILITY_NOTE =
@@ -395,11 +319,7 @@ export async function getAllProviderConfigs() {
       baseUrl: effectiveBaseUrl,
       apiKey: "",
       maskedApiKey: "",
-      models: mergeHydratedProviderModels(
-        provider.id,
-        effectiveBaseUrl,
-        hydrateProviderModels(provider.models) as RuntimeProviderModel[],
-      ),
+      models: hydrateProviderModels(provider.models) as RuntimeProviderModel[],
     };
   });
 }
@@ -422,11 +342,7 @@ export async function getActiveProviderConfig() {
     baseUrl: effectiveBaseUrl,
     apiKey: "",
     maskedApiKey: "",
-    models: mergeHydratedProviderModels(
-      provider.id,
-      effectiveBaseUrl,
-      hydrateProviderModels(provider.models) as RuntimeProviderModel[],
-    ),
+    models: hydrateProviderModels(provider.models) as RuntimeProviderModel[],
   };
 }
 

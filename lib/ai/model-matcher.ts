@@ -1,5 +1,11 @@
 import type { ModelDetectionResult } from "@/types/domain";
 
+/**
+ * 默认模型推荐：只在中转站真实返回的上游模型中选择。
+ * 不含任何本地写死的模型 ID 作为「必须存在」的依赖，
+ * 下面的加权规则只用于在同一能力集合内排序，模型不存在时自动退化为通用打分。
+ */
+
 function sortByScore(
   models: ModelDetectionResult[],
   score: (model: ModelDetectionResult) => number,
@@ -39,82 +45,73 @@ function isVisionCandidate(model: ModelDetectionResult) {
   return Boolean(model.capabilities.vision && !isImageProductionModel(model));
 }
 
-function normalizeModelId(modelId: string) {
-  return modelId.toLowerCase().replace(/[^a-z0-9.]+/g, "");
-}
-
-function findPreferredModel(models: ModelDetectionResult[], preferredIds: string[]) {
-  const normalizedPreferences = preferredIds.map(normalizeModelId);
-  for (const id of normalizedPreferences) {
-    const match = models.find(model => normalizeModelId(model.modelId) === id);
-    if (match) return match;
-  }
-  return null;
-}
-
-function findGptImage2Model(models: ModelDetectionResult[]) {
-  return (
-    findPreferredModel(models, ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]) ??
-    findPreferredModel(models, ["gpt-image-2", "gptimage2"]) ??
-    sortByScore(
-      models.filter((model) => /^gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(model.modelId)),
-      (model) => (model.modelId.toLowerCase() === "gpt-image-2" ? 100 : 90),
-    )[0] ??
-    null
-  );
-}
-
-const COST_EFFECTIVE_TEXT_MODELS = [
-  "gpt-6-luna",
-  "gpt-5-mini",
-  "gpt-5-nano",
-  "gpt-4.1-mini",
-  "gpt-4.1-nano",
-  "gpt-4o-mini",
-  "gpt-4o",
-  "gpt-4.1",
-];
-
-function findCostEffectiveTextModel(models: ModelDetectionResult[]) {
-  return findPreferredModel(models, COST_EFFECTIVE_TEXT_MODELS);
-}
-
+/** 文本模型质量分层：旗舰 > 中端 > 轻量 > 带 pack/preview 后缀 */
 function scoreTextCandidate(model: ModelDetectionResult) {
   const id = model.modelId.toLowerCase();
   let score = 0;
 
-  if (COST_EFFECTIVE_TEXT_MODELS.map(normalizeModelId).includes(normalizeModelId(id))) score += 80;
-  if (/(mini|nano|flash|lite|turbo)/i.test(id)) score += 12;
   if (model.capabilities.text) score += 20;
-  if (model.capabilities.structured_output) score += 8;
+  if (model.capabilities.structured_output) score += 10;
   if (model.capabilities.vision) score += 6;
-  if (model.capabilities.high_quality) score += 5;
+  if (model.capabilities.high_quality) score += 6;
   if (model.capabilities.fast) score += 2;
-  if (model.capabilities.cheap) score += 8;
-  if (/(pro|max|opus|sonnet|reasoner|plus|5|4\.1|4-)/i.test(id)) score += 3;
-  if (/gpt-5\.5|gpt-5\.4-pro|gpt-5\.5-pro|pro|max/i.test(id)) score -= 18;
-  if (isPreviewOrTest(id)) score -= 8;
-  if (/(image|imagen|dall|flux|recraft|seedream|jimeng|midjourney|ideogram|cogview|audio|tts|speech|embedding|rerank|moderation)/i.test(id)) {
-    score -= 12;
-  }
+  if (model.capabilities.cheap) score += 3;
+
+  // 旗舰档（sol / astra / opus / pro / max）
+  if (/(^|[-_])(sol|astra|opus|ultra)([-_]|$)/i.test(id)) score += 30;
+  if (/(pro|max|high)(?:[-_]|$)/i.test(id)) score += 14;
+  // 中端档
+  if (/(plus|sonnet|turbo)/i.test(id)) score += 6;
+  // 轻量档（可作快速方案，但排序低于旗舰）
+  if (/(mini|nano|lite|flash)(?:[-_]|$)/i.test(id)) score += 4;
+  // 型号世代：数字越大越新
+  const generation = id.match(/(?:gpt|gemini|glm|qwen)[-_]?(\d+(?:\.\d+)?)/);
+  if (generation) score += Math.min(parseFloat(generation[1]), 9);
+
+  // 降权项
+  if (/pack(?:[-_]|$)/i.test(id)) score -= 25;
+  if (isPreviewOrTest(id)) score -= 6;
+  if (/(embedding|rerank|moderation|whisper|tts|speech|transcrib|audio|video)/i.test(id)) score -= 40;
 
   return score;
 }
 
+/** 图像解析（vision）专用打分：优先明确的多模态家族 */
+function scoreVisionCandidate(model: ModelDetectionResult) {
+  const id = model.modelId.toLowerCase();
+  let score = scoreTextCandidate(model);
+
+  // 明确的多模态家族（Gemini 原生多模态、vision/vl 命名）
+  if (/gemini/i.test(id)) score += 40;
+  if (/(vision|vl\b|multimodal|omni)/i.test(id)) score += 30;
+  if (model.capabilities.vision) score += 10;
+  // 纯 pack 变体不作为解析首选
+  if (/pack(?:[-_]|$)/i.test(id)) score -= 30;
+
+  return score;
+}
+
+/** 图像模型质量分层：gpt-image 2.5 > 2 > Nano Banana Pro > 2.1 > 2 > grok */
 function scoreImageCandidate(model: ModelDetectionResult) {
   const id = model.modelId.toLowerCase();
   let score = 0;
 
-  if (normalizeModelId(id) === "gptimage2") score += 100;
-  if (/^gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(id)) score += 90;
   if (hasRealImageGeneration(model)) score += 30;
-  if (hasRealImageEdit(model)) score += 8;
-  if (model.capabilities.high_quality) score += 5;
-  if (/(gpt[-_\s]?image|chatgpt-image|banana|nano-banana|imagen|dall[-_\s]?e|flux|recraft|seedream|jimeng|midjourney|ideogram|hidream|kolors|wanx|cogview)/i.test(id)) {
-    score += 10;
-  }
-  if (/(pro|max|ultra|quality)/i.test(id)) score += 3;
-  if (/(mini|flash|lite)/i.test(id)) score += 1;
+  if (hasRealImageEdit(model)) score += 10;
+  if (model.capabilities.high_quality) score += 4;
+
+  if (/gpt[-_\s]?image[-_\s]?2\.5/i.test(id)) score += 60;
+  else if (/gpt[-_\s]?image[-_\s]?2(?:[-_\s]|$)/i.test(id)) score += 50;
+  else if (/gpt[-_\s]?image/i.test(id)) score += 35;
+  else if (/nano[-_\s]?banana/i.test(id) || /banana/i.test(id)) score += 30;
+  else if (/grok[-_\s]?imagine/i.test(id)) score += 20;
+  else if (/(imagen|flux|seedream|jimeng|midjourney|ideogram|cogview|dall[-_\s]?e)/i.test(id)) score += 15;
+
+  if (/sunburst/i.test(id)) score += 6;
+  if (/flare/i.test(id)) score += 4;
+  if (/pro(?:[-_\s]|$)/i.test(id)) score += 5;
+  // 通道变体（-cf 等）作为次选
+  if (/-cf(?:[-_]|$)/i.test(id)) score -= 8;
   if (isPreviewOrTest(id)) score -= 6;
 
   return score;
@@ -134,35 +131,25 @@ export function recommendDefaultModels(models: ModelDetectionResult[]) {
   const imageEditModels = models.filter((item) => hasRealImageEdit(item));
 
   const analysisModel =
-    findCostEffectiveTextModel(visionModels) ??
-    sortByScore(visionModels.filter((item) => !isPreviewOrTest(item.modelId)), scoreTextCandidate)[0] ??
-    sortByScore(visionModels, scoreTextCandidate)[0] ??
+    sortByScore(visionModels, scoreVisionCandidate)[0] ??
+    sortByScore(textModels, scoreTextCandidate)[0] ??
     null;
 
   const planningModel =
-    findCostEffectiveTextModel(textModels) ??
-    sortByScore(textModels.filter((item) => item.capabilities.structured_output && !isPreviewOrTest(item.modelId)), scoreTextCandidate)[0] ??
-    sortByScore(textModels.filter((item) => !isPreviewOrTest(item.modelId)), scoreTextCandidate)[0] ??
+    sortByScore(textModels.filter((item) => item.capabilities.structured_output), scoreTextCandidate)[0] ??
     sortByScore(textModels, scoreTextCandidate)[0] ??
     null;
 
   const heroImageModel =
-    findGptImage2Model(imageGenerationModels) ??
     sortByScore(stableImageGenerationModels, scoreImageCandidate)[0] ??
     sortByScore(imageGenerationModels, scoreImageCandidate)[0] ??
     null;
 
   const detailImageModel =
-    findGptImage2Model(imageGenerationModels) ??
-    sortByScore(
-      stableImageGenerationModels.filter((item) => /detail|pro|max|ultra|quality|gpt[-_\s]?image|imagen|flux|dall[-_\s]?e|seedream|jimeng|midjourney|ideogram|cogview/i.test(item.modelId)),
-      scoreImageCandidate,
-    )[0] ??
     sortByScore(stableImageGenerationModels, scoreImageCandidate)[0] ??
     heroImageModel;
 
   const imageEditModel =
-    findGptImage2Model(imageEditModels) ??
     sortByScore(stableImageEditModels, scoreImageCandidate)[0] ??
     sortByScore(imageEditModels, scoreImageCandidate)[0] ??
     null;
