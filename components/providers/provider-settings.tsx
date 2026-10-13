@@ -281,6 +281,7 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
   });
   const [connectionStatus, setConnectionStatus] = useState<"idle" | "testing" | "success" | "failed">("idle");
   const [connectionMessage, setConnectionMessage] = useState("");
+  const [connectionInfo, setConnectionInfo] = useState<{ latencyMs?: number; modelCount?: number }>({});
 
   useEffect(() => {
     const stored = readStoredCredentials();
@@ -303,6 +304,13 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
       apiKey: stored.apiKey || DEFAULT_PROVIDER_API_KEY,
     });
   }, [selectedProvider, lockedBaseUrl]);
+
+  // 切换渠道时自动重置连接状态为「未测试」
+  useEffect(() => {
+    setConnectionStatus("idle");
+    setConnectionMessage("");
+    setConnectionInfo({});
+  }, [selectedProviderId]);
 
   type ProviderSubmitValues = ReturnType<typeof currentSubmitValues>;
 
@@ -391,6 +399,7 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
     });
     const payload = await response.json();
     if (!payload.success) throw new Error(payload.error?.message ?? "连接测试失败");
+    return payload.data as { latencyMs?: number; modelCount?: number; providerLabel?: string };
   }
 
   async function discoverProviderModels(values: ProviderSubmitValues) {
@@ -428,14 +437,17 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
   async function handleTestConnection() {
     setConnectionStatus("testing");
     setConnectionMessage("");
+    setConnectionInfo({});
     try {
       const values = persistCurrentCredentials();
-      await testProviderConnection(values);
+      const result = await testProviderConnection(values);
       setConnectionStatus("success");
-      setConnectionMessage("连接正常，中转站可用");
+      setConnectionInfo({ latencyMs: result?.latencyMs, modelCount: result?.modelCount });
+      setConnectionMessage("");
     } catch (error) {
       setConnectionStatus("failed");
-      setConnectionMessage(error instanceof Error ? error.message : "连接失败");
+      setConnectionInfo({});
+      setConnectionMessage(error instanceof Error ? error.message : "不通：连接失败");
     }
   }
 
@@ -443,11 +455,13 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
     setLoading("configure");
     setConnectionStatus("testing");
     setConnectionMessage("");
+    setConnectionInfo({});
     try {
       const values = persistCurrentCredentials();
-      await testProviderConnection(values);
+      const testResult = await testProviderConnection(values);
       setConnectionStatus("success");
-      setConnectionMessage("连接正常，中转站可用");
+      setConnectionInfo({ latencyMs: testResult?.latencyMs, modelCount: testResult?.modelCount });
+      setConnectionMessage("");
       const { discoveredModels, recommendedDefaults } = await discoverProviderModels(values);
       // Refresh the catalogue without replacing the user's explicit choices.
       const sameService = values.baseUrl.replace(/\/+$/, "") === selectedProvider?.baseUrl.replace(/\/+$/, "");
@@ -589,7 +603,7 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-3">
                 <span
-                  aria-label={connectionStatus === "success" ? "连接正常" : connectionStatus === "failed" ? "连接不通" : "未测试"}
+                  aria-label={connectionStatus === "success" ? "连接正常" : connectionStatus === "failed" ? "不通" : "未测试"}
                   className={
                     "inline-block h-3.5 w-3.5 shrink-0 rounded-full border " +
                     (connectionStatus === "success"
@@ -603,19 +617,23 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
                 />
                 <div className="space-y-1">
                   <p className="text-sm font-medium">中转站连接测试</p>
-                  <p className={
-                    "text-xs leading-6 " +
-                    (connectionStatus === "success"
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : connectionStatus === "failed"
-                        ? "text-red-600 dark:text-red-400"
-                        : "text-muted-foreground")
-                  }>
+                  <p
+                    className={
+                      "text-xs font-medium leading-6 " +
+                      (connectionStatus === "success"
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : connectionStatus === "failed"
+                          ? "text-red-600 dark:text-red-400"
+                          : "text-muted-foreground")
+                    }
+                  >
                     {connectionStatus === "testing"
-                      ? "正在测试连接..."
-                      : connectionStatus === "idle"
-                        ? "绿色表示连接正常，红色表示不通。点击右侧按钮测试。"
-                        : connectionMessage}
+                      ? "⏳ 正在测试连接..."
+                      : connectionStatus === "success"
+                        ? `🟢 连接正常${connectionInfo.latencyMs != null ? ` · ${connectionInfo.latencyMs}ms` : ""}${connectionInfo.modelCount != null ? ` · ${connectionInfo.modelCount} 个模型` : ""}`
+                        : connectionStatus === "failed"
+                          ? `🔴 ${connectionMessage || "不通：未知原因"}`
+                          : "⚪ 未测试"}
                   </p>
                 </div>
               </div>

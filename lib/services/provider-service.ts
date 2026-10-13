@@ -249,8 +249,42 @@ async function replaceProviderModels(
 }
 
 export async function testProviderConnection(input: ProviderConnectionInput) {
-  const adapter = new OpenAICompatibleAdapter(resolveEffectiveBaseUrl(input.baseUrl), input.apiKey);
-  return adapter.testConnection();
+  const baseUrl = resolveEffectiveBaseUrl(input.baseUrl);
+  const adapter = new OpenAICompatibleAdapter(baseUrl, input.apiKey);
+  const startedAt = Date.now();
+  try {
+    const models = await adapter.listModels();
+    return {
+      ok: true,
+      providerLabel: baseUrl,
+      modelCount: models.length,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    throw new Error(describeConnectionFailure(error, input.apiKey));
+  }
+}
+
+function describeConnectionFailure(error: unknown, apiKey: string) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const masked = apiKey.length > 10 ? `${apiKey.slice(0, 6)}***${apiKey.slice(-4)}` : "***";
+
+  if (/\((401|403)\)/.test(raw) || /unauthorized|invalid[\s_-]?api[\s_-]?key|no permission|forbidden|invalid token/i.test(raw)) {
+    return `不通：API Key 无效或无权限（${masked}）`;
+  }
+  if (/\((404|405)\)/.test(raw)) {
+    return "不通：接口地址错误，未找到 /models 接口，请检查 baseURL 是否为 /v1 结尾";
+  }
+  if (/\((429)\)/.test(raw)) {
+    return "不通：请求过于频繁或额度不足（429）";
+  }
+  if (/\((5\d\d)\)/.test(raw)) {
+    return `不通：中转站服务异常（${raw.match(/\((5\d\d)\)/)?.[1]}）`;
+  }
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|timeout|aborted|network/i.test(raw)) {
+    return "不通：网络连接失败或超时，请检查网络与中转站地址";
+  }
+  return `不通：${raw}`;
 }
 
 export async function resolveProviderConnectionInput(
