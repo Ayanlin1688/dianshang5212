@@ -5,7 +5,7 @@ const nextConfig = {
   output: "standalone",
   distDir,
   experimental: {
-    serverComponentsExternalPackages: ["@openai/agents", "@openai/agents-core", "@openai/agents-openai", "sharp"],
+    serverComponentsExternalPackages: ["@openai/agents", "@openai/agents-core", "@openai/agents-openai", "sharp", "undici"],
     serverActions: {
       bodySizeLimit: "10mb",
     },

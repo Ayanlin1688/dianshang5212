@@ -39,3 +39,18 @@ test("nested network errors remain distinguishable and cyclic causes terminate",
   cyclic.cause = cyclic;
   assert.equal(networkErrorCode(cyclic), undefined);
 });
+
+// A slow non-streaming completion is aborted by undici's own transport budget
+// long before any caller-owned AbortSignal fires, so these codes must stay
+// recognizable (and reported as timeouts) instead of collapsing to a generic
+// network error.
+test("undici transport budget errors are recognized and classified as timeouts", async () => {
+  for (const code of ["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]) {
+    const error = new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error"), { code }) });
+    assert.equal(networkErrorCode(error), code);
+    assert.equal(handleRouteError(error).status, 504);
+  }
+  // Abort reasons are DOMExceptions carrying a name but no code.
+  const domException = Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+  assert.equal(networkErrorCode(new TypeError("fetch failed", { cause: domException })), "ETIMEDOUT");
+});

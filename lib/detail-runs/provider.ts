@@ -7,6 +7,7 @@ import { z } from "zod";
 import { getProviderAdapter } from "@/lib/services/provider-service";
 import { logApiUsage } from "@/lib/monitor/api-usage";
 import { networkErrorCode } from "@/lib/utils/network-error";
+import { withRelayDispatcher } from "@/lib/utils/relay-dispatcher";
 
 export type AgentConnection = { apiKey: string; baseUrl: string; modelId: string; transport: "responses" | "chat" };
 
@@ -81,7 +82,10 @@ export function makeRunner(connection: AgentConnection, projectId?: string, runI
         let response: Response;
         let body: string;
         try {
-          response = await fetch(url, requestInit);
+          // Route through the long-budget dispatcher: undici's default 300s
+          // headersTimeout would abort a slow non-streaming completion before
+          // our own per-attempt deadline ever fires.
+          response = await fetch(url, withRelayDispatcher(requestInit) as RequestInit);
           // A gateway can disconnect after headers arrive, while reading the body.
           body = await response.clone().text();
         } catch (error) {
@@ -93,7 +97,7 @@ export function makeRunner(connection: AgentConnection, projectId?: string, runI
             responseBytes: 0, responseBody: "", errorMessage: `Network request failed (${networkErrorCode(error) || (isTimeoutError(error) ? "REQUEST_TIMEOUT" : "NETWORK_ERROR")})`,
           }).catch(() => undefined);
           const code = networkErrorCode(error) || "";
-          const timedOut = isTimeoutError(error) || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT";
+          const timedOut = isTimeoutError(error) || ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(code);
           const transient = ["ECONNRESET", "UND_ERR_SOCKET", "EAI_AGAIN", "ECONNREFUSED"].includes(code);
           // Relay gateways often hang once and answer the retry. Replay only
           // this single model HTTP request, never Runner.run or image generation.

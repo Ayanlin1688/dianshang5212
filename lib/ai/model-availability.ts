@@ -7,6 +7,8 @@
  * 模型才会被选作「规划模型 / 图像识别模型」。
  */
 
+import { withRelayDispatcher } from "@/lib/utils/relay-dispatcher";
+
 export type ModelProbeStatus = "ok" | "unavailable" | "inconclusive";
 
 export type ModelProbeResult = {
@@ -131,7 +133,7 @@ async function postChat(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(url, withRelayDispatcher({
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -140,7 +142,7 @@ async function postChat(
       body: JSON.stringify(body),
       cache: "no-store",
       signal: controller.signal,
-    });
+    }) as RequestInit);
     const text = await response.text();
     return { ok: response.ok, status: response.status, body: text };
   } catch (error) {

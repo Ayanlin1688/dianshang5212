@@ -7,6 +7,7 @@ import { nanoid } from "nanoid";
 import { prisma } from "@/lib/db/prisma";
 import { env } from "@/lib/utils/env";
 import { extFromMime, relativeStorageUrl, sanitizeFileName } from "@/lib/utils/files";
+import { withRelayDispatcher } from "@/lib/utils/relay-dispatcher";
 
 function rootDir() {
   return path.resolve(process.cwd(), env.STORAGE_ROOT);
@@ -72,7 +73,7 @@ async function downloadGeneratedImage(url: string, timeoutMs = GENERATED_IMAGE_D
 
   for (let attempt = 1; attempt <= GENERATED_IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      const response = await fetch(url, withRelayDispatcher({ signal: AbortSignal.timeout(timeoutMs) }) as RequestInit);
       if (!response.ok) {
         throw new Error(`Failed to download generated image: ${response.status}`);
       }

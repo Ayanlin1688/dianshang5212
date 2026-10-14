@@ -48,7 +48,7 @@ function mapProviderError(error: Error) {
     };
   }
 
-  if (/timed out|timeout|aborterror|请求超时|\b504\b/.test(text) || causeCode === "ETIMEDOUT" || causeCode === "UND_ERR_CONNECT_TIMEOUT") {
+  if (/timed out|timeout|aborterror|请求超时|\b504\b/.test(text) || ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(causeCode ?? "")) {
     return {
       code: "PROVIDER_TIMEOUT",
       message: "当前 Provider 响应超时，请稍后重试，并检查厂商服务状态。",

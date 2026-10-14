@@ -11,6 +11,7 @@ import type {
   TextRequest,
 } from "@/lib/ai/provider-client";
 import { inferCategory, logApiUsage } from "@/lib/monitor/api-usage";
+import { withRelayDispatcher } from "@/lib/utils/relay-dispatcher";
 
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
@@ -379,7 +380,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const requestBytes = typeof init?.body === "string" ? Buffer.byteLength(init.body) : 0;
 
     try {
-      const response = await fetch(url, {
+      const response = await fetch(url, withRelayDispatcher({
         ...init,
         headers: {
           ...(typeof FormData !== "undefined" && init?.body instanceof FormData
@@ -391,7 +392,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         },
         cache: "no-store",
         signal: controller.signal,
-      });
+      }) as RequestInit);
 
       const body = await response.text();
       if (!options?.suppressUsageLog) {

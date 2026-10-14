@@ -44,7 +44,7 @@ export function describeRunFailure(error: unknown, phase: string) {
     code = "PROVIDER_AUTH_ERROR"; message = `厂商拒绝访问（HTTP ${status}），请核对 Key 和模型权限后继续。`;
   } else if (status === 429) {
     code = "PROVIDER_RATE_LIMIT"; message = "厂商限流或额度不足（HTTP 429），请核对额度或稍后继续。";
-  } else if (names.some(n => /Timeout|Abort/.test(n || "")) || messages.some(m => /timed out|timeout/i.test(m)) || network === "ETIMEDOUT" || network === "UND_ERR_CONNECT_TIMEOUT") {
+  } else if (names.some(n => /Timeout|Abort/.test(n || "")) || messages.some(m => /timed out|timeout/i.test(m)) || ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(network ?? "")) {
     code = "PROVIDER_TIMEOUT"; message = "模型请求超时，检查点已保留，请稍后继续。";
   } else if (network === "EACCES" || network === "EPERM") {
     code = "PROVIDER_NETWORK_PERMISSION"; message = "服务端外网访问被运行环境限制，请恢复网络权限后继续。";

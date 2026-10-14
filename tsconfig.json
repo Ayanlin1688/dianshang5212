@@ -38,8 +38,8 @@
     "**/*.mts",
     "**/*.cts",
     ".next-desktop/types/**/*.ts",
-    ".next-run1/types/**/*.ts",
-    ".next-run2/types/**/*.ts"
+    ".next-run*/types/**/*.ts",
+    ".next-run3/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

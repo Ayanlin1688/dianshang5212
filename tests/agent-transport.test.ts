@@ -76,3 +76,39 @@ test("Agent model requests recover once without replaying tools", { timeout: 600
     });
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
+
+test("Agent requests carry the long-budget dispatcher into fetch", { timeout: 60000 }, async () => {
+  process.env.STORAGE_ROOT = await mkdtemp(path.join(tmpdir(), "mxpage-dispatcher-test-"));
+  const { makeRunner } = await import("../lib/detail-runs/provider");
+  const { relayDispatcher } = await import("../lib/utils/relay-dispatcher");
+  const server = createServer(async (request, response) => {
+    for await (const _ of request) { /* drain */ }
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({
+      id: "resp_fixture", object: "response", created_at: 1, status: "completed", model: "fixture",
+      output: [{ type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "done", annotations: [] }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address(); assert.ok(address && typeof address === "object");
+
+  // Without the shared agent, undici aborts a slow non-streaming completion at
+  // 300s with UND_ERR_HEADERS_TIMEOUT, which no caller AbortSignal can override.
+  const seen: Array<{ dispatcher?: unknown }> = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    seen.push(init as { dispatcher?: unknown });
+    return original(url as never, init as never);
+  }) as typeof fetch;
+  try {
+    const agent = new Agent({ name: "dispatcher-fixture", model: "fixture", instructions: "Reply" });
+    await makeRunner({ baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "fixture", modelId: "fixture", transport: "responses" }, undefined, "fixture-run").run(agent, "hi", { maxTurns: 1 });
+  } finally {
+    globalThis.fetch = original;
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+  assert.ok(seen.length > 0, "the model request must go through fetch");
+  for (const init of seen) assert.equal(init.dispatcher, relayDispatcher(), "every relay attempt must use the shared agent");
+});
+

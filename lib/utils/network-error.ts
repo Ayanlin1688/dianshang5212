@@ -1,5 +1,12 @@
 // SDKs wrap fetch errors; Windows may put the socket error inside AggregateError.
 // Inspect codes only, never serialize request headers or provider response bodies.
+//
+// undici surfaces its own transport budget as UND_ERR_HEADERS_TIMEOUT /
+// UND_ERR_BODY_TIMEOUT (the built-in fetch defaults both to 300s, well below a
+// slow non-streaming completion), so those must be reported as timeouts rather
+// than being flattened into a generic network error.
+const KNOWN_CODES = /^(ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_ABORTED)$/;
+
 export function networkErrorCode(error: unknown): string | undefined {
   const pending: unknown[] = [error];
   const seen = new Set<object>();
@@ -8,9 +15,11 @@ export function networkErrorCode(error: unknown): string | undefined {
     const value = pending.shift();
     if (!value || typeof value !== "object" || seen.has(value)) continue;
     seen.add(value);
-    const item = value as { code?: unknown; cause?: unknown; errors?: unknown };
+    const item = value as { code?: unknown; cause?: unknown; errors?: unknown; name?: unknown };
     if (item.code === "EACCES" || item.code === "EPERM") return item.code;
-    if (typeof item.code === "string" && /^(ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET)$/.test(item.code)) fallback ??= item.code;
+    if (typeof item.code === "string" && KNOWN_CODES.test(item.code)) fallback ??= item.code;
+    // Abort reasons are DOMExceptions (name, not code) and are not Error instances.
+    if (fallback === undefined && (item.name === "TimeoutError" || item.name === "ConnectTimeoutError")) fallback = "ETIMEDOUT";
     if (item.cause) pending.push(item.cause);
     if (Array.isArray(item.errors)) pending.push(...item.errors.slice(0, 8));
   }
