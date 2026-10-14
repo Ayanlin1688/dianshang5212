@@ -22,7 +22,11 @@
     "prisma:migrate": "node ./scripts/apply-prisma-migrations.cjs",
     "prisma:deploy": "node ./scripts/apply-prisma-migrations.cjs",
     "seed:provider": "tsx ./scripts/seed-kkone-provider.ts",
-    "sync:provider": "tsx ./scripts/sync-upstream-models.ts"
+    "sync:provider": "tsx ./scripts/sync-upstream-models.ts",
+    "github:sync": "node ./scripts/github-sync.mjs",
+    "github:watch": "node ./scripts/sync-watch.mjs",
+    "github:status": "node ./scripts/sync-stop.mjs",
+    "github:stop": "node ./scripts/sync-stop.mjs --stop"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
