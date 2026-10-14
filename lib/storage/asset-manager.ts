@@ -63,6 +63,41 @@ export async function saveUploadAsset(params: {
   });
 }
 
+/** 生成图片若只返回 url，需要二次下载；给足超时并重试，避免网关抖动时任务永久挂起。 */
+const GENERATED_IMAGE_DOWNLOAD_TIMEOUT_MS = 120_000;
+const GENERATED_IMAGE_DOWNLOAD_ATTEMPTS = 2;
+
+async function downloadGeneratedImage(url: string, timeoutMs = GENERATED_IMAGE_DOWNLOAD_TIMEOUT_MS) {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= GENERATED_IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) {
+        throw new Error(`Failed to download generated image: ${response.status}`);
+      }
+
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.byteLength) {
+        throw new Error("Downloaded generated image is empty.");
+      }
+
+      return bytes;
+    } catch (error) {
+      lastError = error;
+      if (attempt < GENERATED_IMAGE_DOWNLOAD_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+      }
+    }
+  }
+
+  throw new Error(
+    `下载生成图片失败（已重试 ${GENERATED_IMAGE_DOWNLOAD_ATTEMPTS} 次）：${
+      lastError instanceof Error ? lastError.message : "未知错误"
+    }`,
+  );
+}
+
 export async function saveGeneratedImage(params: {
   projectId: string;
   sectionId: string;
@@ -74,6 +109,8 @@ export async function saveGeneratedImage(params: {
     mimeType?: string | null;
   };
   metadata?: Record<string, unknown>;
+  /** 仅当只能通过 url 取图时生效 */
+  downloadTimeoutMs?: number;
 }) {
   await ensureStorageScaffold();
   const dir = projectDir(params.projectId, "generated", params.sectionId);
@@ -91,11 +128,7 @@ export async function saveGeneratedImage(params: {
   } else if (params.source.b64Json) {
     await fs.writeFile(absolutePath, Buffer.from(params.source.b64Json, "base64"));
   } else if (params.source.url) {
-    const response = await fetch(params.source.url);
-    if (!response.ok) {
-      throw new Error(`Failed to download generated image: ${response.status}`);
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes = await downloadGeneratedImage(params.source.url, params.downloadTimeoutMs);
     await fs.writeFile(absolutePath, bytes);
   } else {
     throw new Error("Image generation produced no usable image output.");

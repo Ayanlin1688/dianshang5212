@@ -11,6 +11,10 @@ import { readStorageFile } from "@/lib/storage/asset-manager";
 
 const MAX_ANALYSIS_IMAGES = 10;
 
+// 推理型视觉模型分析多张商品图时，中转站实测常在 60s 左右甚至更久，
+// 原先沿用适配器 60s 默认超时会导致必然超时失败。
+const ANALYSIS_TIMEOUT_MS = 180_000;
+
 function normalizeModelId(value: string) {
   return value.toLowerCase();
 }
@@ -121,6 +125,7 @@ async function repairAnalysisOutput(input: {
     model: input.model,
     systemPrompt: "Return one strict JSON object only.",
     userPrompt: buildProductAnalysisRepairPrompt(input.raw),
+    timeoutMs: ANALYSIS_TIMEOUT_MS,
     monitor: {
       operation: "analysis_output_repair",
     },
@@ -203,6 +208,7 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
         userPrompt: prompt,
         schema: productAnalysisOutputSchema,
         images: imageUrls,
+        timeoutMs: ANALYSIS_TIMEOUT_MS,
         monitor: {
           projectId,
           operation: "project_analysis",
@@ -225,6 +231,7 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
         systemPrompt: "Return one strict JSON object only. No markdown.",
         userPrompt: prompt,
         images: imageUrls,
+        timeoutMs: ANALYSIS_TIMEOUT_MS,
         monitor: {
           projectId,
           operation: "project_analysis_fallback",

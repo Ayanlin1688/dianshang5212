@@ -411,11 +411,21 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
   }
 
   async function testProviderConnection(values: ProviderSubmitValues) {
-    const response = await fetch("/api/providers/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(values),
-    });
+    let response: Response;
+    try {
+      response = await fetch("/api/providers/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+        // 中转站网络异常时不要让按钮无限转圈，45s 内必须给出结论
+        signal: AbortSignal.timeout(45_000),
+      });
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new Error("不通：连接测试超时（45s），请检查网络或中转站地址");
+      }
+      throw error;
+    }
     const payload = await response.json();
     if (!payload.success) throw new Error(payload.error?.message ?? "连接测试失败");
     return payload.data as { latencyMs?: number; modelCount?: number; providerLabel?: string };

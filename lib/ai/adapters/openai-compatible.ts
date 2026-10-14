@@ -1095,19 +1095,28 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     monitor?: AiMonitorContext;
     signal?: AbortSignal;
   }) {
-    const fields = {
+    const baseFields = {
       model: input.model,
       prompt: input.prompt,
       size: resolveOpenAiSize(input),
     };
     const errors: string[] = [];
 
-    for (const imageFieldName of ["image[]", "image"] as const) {
+    // 优先要求内联 base64：中转站常把图片放在一个下载极慢的网关上，
+    // 若只拿到 url，软件还要再花数分钟把它拉回来；内联返回可直接落盘。
+    const attempts = [
+      { fields: { ...baseFields, response_format: "b64_json" }, imageFieldName: "image[]" as const },
+      { fields: { ...baseFields, response_format: "b64_json" }, imageFieldName: "image" as const },
+      { fields: baseFields, imageFieldName: "image[]" as const },
+      { fields: baseFields, imageFieldName: "image" as const },
+    ];
+
+    for (const attempt of attempts) {
       try {
         const payload = await this.requestMultipartJson<{
           data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
-        }>("/images/edits", fields, input.images, {
-          imageFieldName,
+        }>("/images/edits", attempt.fields, input.images, {
+          imageFieldName: attempt.imageFieldName,
           timeoutMs: input.timeoutMs ?? 120000,
           monitor: input.monitor,
           signal: input.signal,
@@ -1129,10 +1138,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     form.append("model", input.model);
     form.append("prompt", input.prompt);
     form.append("size", resolveOpenAiSize(input));
+    form.append("response_format", "b64_json");
     const images = input.referenceImages ?? [];
     images.forEach((image, index) => form.append(images.length > 1 ? "image[]" : "image", dataUrlToBlob(image), `reference-${index}.png`));
     const endpoint = `${this.baseUrl.replace(/\/$/, "")}/images/${images.length ? "edits" : "generations"}`;
-    const response = await this.fetchRaw(endpoint, images.length ? { method: "POST", body: form } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: input.model, prompt: input.prompt, quality: input.quality ?? "auto", size: resolveOpenAiSize(input), n: 1 }) }, undefined, input.timeoutMs ?? 180000, input.monitor);
+    const response = await this.fetchRaw(endpoint, images.length ? { method: "POST", body: form } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: input.model, prompt: input.prompt, quality: input.quality ?? "auto", size: resolveOpenAiSize(input), n: 1, response_format: "b64_json" }) }, undefined, input.timeoutMs ?? 180000, input.monitor);
     if (!response.ok) throw new Error(`Image request failed (${response.status}). Check API monitor; explicitly retry if needed.`);
     return extractImageResult(JSON.parse(response.body));
   }
@@ -1194,6 +1204,26 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             prompt: input.prompt,
             size: resolveOpenAiSize(input),
             images: imageRefs,
+            response_format: "b64_json",
+          },
+        },
+        {
+          path: "/images/generations",
+          body: {
+            model: input.model,
+            prompt: input.prompt,
+            size: resolveOpenAiSize(input),
+            reference_images: imageRefs,
+            response_format: "b64_json",
+          },
+        },
+        {
+          path: "/images/edits",
+          body: {
+            model: input.model,
+            prompt: input.prompt,
+            size: resolveOpenAiSize(input),
+            images: imageRefs,
           },
         },
         {
@@ -1243,34 +1273,44 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       throw new Error(`Reference-guided image generation failed: ${referenceErrors.join(" | ")}`);
     }
 
-    try {
-      const payload = await this.requestJson<{
-        data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
-      }>("/images/generations", {
-        method: "POST",
-        body: JSON.stringify({
-          model: input.model,
-          prompt: input.prompt,
-          size: resolveOpenAiSize(input),
-        }),
-        signal: input.signal,
-      }, input.timeoutMs ?? 120000, input.monitor);
+    const generationBody = (withInlineBase64: boolean) => ({
+      model: input.model,
+      prompt: input.prompt,
+      size: resolveOpenAiSize(input),
+      ...(withInlineBase64 ? { response_format: "b64_json" } : {}),
+    });
 
-      return extractImageResult(payload);
-    } catch (error) {
-      if (!isGeminiImageModel(input.model)) {
-        throw error;
+    let lastError: unknown = null;
+
+    // 先要 b64（免下载），失败再回退到不带 response_format 的原始请求。
+    for (const withInlineBase64 of [true, false]) {
+      try {
+        const payload = await this.requestJson<{
+          data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
+        }>("/images/generations", {
+          method: "POST",
+          body: JSON.stringify(generationBody(withInlineBase64)),
+          signal: input.signal,
+        }, input.timeoutMs ?? 120000, input.monitor);
+
+        return extractImageResult(payload);
+      } catch (error) {
+        lastError = error;
       }
-
-      return this.generateGeminiImageWithGoogleProtocol({
-        model: input.model,
-        prompt: input.prompt,
-        size: input.size,
-        aspectRatio: input.aspectRatio,
-        monitor: input.monitor,
-        signal: input.signal,
-      });
     }
+
+    if (!isGeminiImageModel(input.model)) {
+      throw lastError instanceof Error ? lastError : new Error("Image generation request failed.");
+    }
+
+    return this.generateGeminiImageWithGoogleProtocol({
+      model: input.model,
+      prompt: input.prompt,
+      size: input.size,
+      aspectRatio: input.aspectRatio,
+      monitor: input.monitor,
+      signal: input.signal,
+    });
   }
 
   async editImage(input: ImageEditRequest): Promise<ImageGenerationResult> {
@@ -1312,6 +1352,28 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
 
     const attempts = [
+      {
+        path: "/images/edits",
+        body: {
+          model: input.model,
+          prompt: input.prompt,
+          size: resolveOpenAiSize(input),
+          images: imageRefs,
+          response_format: "b64_json",
+          ...(input.mask ? { mask: toMaskRef(input.mask) } : {}),
+        },
+      },
+      {
+        path: "/images/generations",
+        body: {
+          model: input.model,
+          prompt: input.prompt,
+          size: resolveOpenAiSize(input),
+          reference_images: imageRefs,
+          response_format: "b64_json",
+          ...(input.mask ? { mask: toMaskRef(input.mask) } : {}),
+        },
+      },
       {
         path: "/images/edits",
         body: {
