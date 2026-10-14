@@ -98,7 +98,16 @@ function cycle(reason) {
       return;
     }
     if (hasStagedChanges()) {
-      const commit = git(["commit", "-m", `chore: 自动同步 ${stamp()}`]);
+      const files = git(["diff", "--cached", "--name-only"])
+        .stdout.split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const summary =
+        files.length > 3
+          ? `${files.slice(0, 3).join("、")} 等 ${files.length} 个文件`
+          : files.join("、");
+      const body = `chore: 自动同步 ${stamp()}${summary ? `\n\n改动：${summary}` : ""}`;
+      const commit = git(["commit", "-m", body]);
       if (commit.status !== 0) {
         const detail = `${commit.stderr || commit.stdout || ""}`.trim().split("\n")[0];
         writeLog(`[watch] 提交失败（可能存在冲突）：${detail}`);
