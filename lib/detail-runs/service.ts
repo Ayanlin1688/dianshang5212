@@ -539,8 +539,9 @@ async function executeRun(runId: string) {
         const content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image: string; detail: "high" }> = [{ type: "input_text", text: JSON.stringify({ plan: cp.creativeVersion === 3 ? intentForDirector(commerce.data) : commerce.data, sections: cp.creativeVersion === 3 ? targets.map(({ id, kind }) => ({ id, kind })) : targets, platform: project.platform, language: input.language, userVisualDirection: cp.userVisualDirection || "No explicit user visual constraint.", recommendedDirection: cp.designDraft ? "Repair the saved draft using previousFeedback. Preserve valid sections, product information, IDs and shared seams. Submit the COMPLETE corrected storyboard." : "AI suggestions are replaceable. Design fresh staging and light appropriate to the verified product; choose whether words add information.", imageRoles, allowedStyleReferenceIds: (cp.styleReferences || []).map(r => r.id), previousDraft: cp.designDraft, previousFeedback: cp.designReview }) }, ...designImages];
         // A full 7-30-frame production storyboard is materially longer than a review.
         // Monitor logs show this single turn can exceed 300s on the relay even with
-        // reasoning low; keep the deadline generous and zero SDK retries.
-        await makeRunner(connection, projectId, runId, 600000).run(designer, [{ role: "user", content }], { maxTurns: 3 });
+        // reasoning low; a 40-frame probe of the same gateway took 822s, so keep the
+        // deadline above that and zero SDK retries.
+        await makeRunner(connection, projectId, runId, 900000).run(designer, [{ role: "user", content }], { maxTurns: 3 });
       }
       if (!cp.artDirection) throw new Error("ART_DIRECTION_MISSING");
     }

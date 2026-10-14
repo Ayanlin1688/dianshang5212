@@ -13,8 +13,12 @@ import { Agent } from "undici";
  *
  * The generous budgets here also cover the relay's slow image CDN, which can
  * trickle a single image for minutes.
+ *
+ * Measured: the relay answered a 24-frame storyboard in 268s and a 40-frame one
+ * in 822s without dropping the connection, so this ceiling must stay above every
+ * per-stage budget (the design stage now allows 900s).
  */
-const RELAY_TIMEOUT_MS = 900_000;
+const RELAY_TIMEOUT_MS = 1_500_000;
 
 let cached: Agent | null | undefined;
 
