@@ -9,6 +9,22 @@ import { logApiUsage } from "@/lib/monitor/api-usage";
 import { networkErrorCode } from "@/lib/utils/network-error";
 
 export type AgentConnection = { apiKey: string; baseUrl: string; modelId: string; transport: "responses" | "chat" };
+
+/**
+ * Agent 通用模型参数。gpt-*-sol / gpt-*-luna 家族（gpt-5.6-sol、gpt-6.1-sol 等）：
+ * - responses 通道实测接受 reasoning effort low/none（小请求 4s 级返回），默认中档推理
+ *   会把输出量最大的设计阶段推到 300s 以上直至超时；
+ * - chat 通道沿用 reasoning_effort=none（该网关对原始 reasoning 对象报 400）。
+ */
+export function agentModelSettings(transport: AgentConnection["transport"], modelId: string) {
+  const fastFamily = /^gpt-[\d.]+-(luna|sol)(?:-|$)/.test(modelId);
+  return {
+    parallelToolCalls: false as const,
+    store: false as const,
+    ...(fastFamily ? { reasoning: { effort: (transport === "chat" ? "none" : "low") as "none" | "low" } } : {}),
+  };
+}
+
 const cache = new Map<string, { expires: number; connection: Omit<AgentConnection, "apiKey"> }>();
 
 // Abort reasons are DOMExceptions (AbortError / TimeoutError), which are not
@@ -174,7 +190,7 @@ export async function resolveAgentConnection(force = false, role: "planning" | "
     try {
       const agent = new Agent({ name: "CompatibilityCheck", model: modelId, tools: role === "analysis" ? [probe] : [probe, verifyResult],
         toolUseBehavior: role === "analysis" ? "stop_on_first_tool" : { stopAtToolNames: ["verify_result"] },
-        modelSettings: { parallelToolCalls: false, store: false, ...(connection.transport === "chat" && /^gpt-6-(luna|sol)(?:-|$)/.test(connection.modelId) ? { reasoning: { effort: "none" as const } } : {}) },
+        modelSettings: agentModelSettings(transport, modelId),
         instructions: role === "analysis" ? "Inspect the user's image and call verify_image once with its solid color (red/blue/green)." : "First inspect the user's image and call verify_image with its color. Then inspect the NEW image returned by that tool, which differs from the original. Call verify_result with the exact token returned by verify_image and the NEW image's color (red/blue/green). Submit through tools, not a prose reply.",
       });
       // The relay answers even trivial requests in 50s+; the 90s default

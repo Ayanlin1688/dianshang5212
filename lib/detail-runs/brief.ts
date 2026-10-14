@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db/prisma";
 import { readStorageFile } from "@/lib/storage/asset-manager";
 import { assertProjectIdle } from "./service";
-import { makeRunner, resolveAgentConnection } from "./provider";
+import { agentModelSettings, makeRunner, resolveAgentConnection } from "./provider";
 import { categoryProfiles, categorySchema } from "./merchandising";
 import { isStyleReference } from "@/lib/utils/asset-purpose";
 import { runBriefStep } from "./brief-recovery";
@@ -51,7 +51,7 @@ async function analyze(projectId: string, force: boolean, resume: boolean) {
   let brief: z.infer<typeof productObservationsSchema> | undefined = draft?.observations;
   const save = tool({ name: "save_creation_brief", description: "Submit evidence-based product observations and category only, in Chinese. No styling restrictions.", parameters: productObservationsSchema, errorFunction: null,
     execute: async (value) => { brief ??= productObservationsSchema.parse(value); return "Saved. End the analysis."; } });
-  const modelSettings = { parallelToolCalls: false, store: false, ...(connection.transport === "chat" && /^gpt-6-(luna|sol)(?:-|$)/.test(connection.modelId) ? { reasoning: { effort: "none" as const } } : {}) };
+  const modelSettings = agentModelSettings(connection.transport, connection.modelId);
   const agent = new Agent({ name: "ProductPreparation", model: connection.modelId, tools: [save],
     toolUseBehavior: "stop_on_first_tool",
     modelSettings,

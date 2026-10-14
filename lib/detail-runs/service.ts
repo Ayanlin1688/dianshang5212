@@ -20,7 +20,7 @@ import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
 import { getProviderAdapter } from "@/lib/services/provider-service";
 import { runWithProviderCredentials, type RequestProviderCredentials } from "@/lib/services/provider-runtime";
 import { readStorageFile, saveGeneratedImage } from "@/lib/storage/asset-manager";
-import { makeRunner, resolveAgentConnection } from "./provider";
+import { agentModelSettings, makeRunner, resolveAgentConnection } from "./provider";
 import { detailRunInputSchema, outcome, mayGenerate, RUN_ACTIVE, type DetailRunInput, type RunCheckpoint, type ImageProgress } from "./contracts";
 import { describeRunFailure, toolInputFeedback } from "./run-errors";
 
@@ -378,7 +378,7 @@ async function executeRun(runId: string) {
         return { sectionId, error: progress.error, message: "Do not retry this section automatically. Continue other sections." };
       }
     }
-    const modelSettings = { parallelToolCalls: false, store: false, ...(connection.transport === "chat" && /^gpt-6-(luna|sol)(?:-|$)/.test(connection.modelId) ? { reasoning: { effort: "none" as const } } : {}) };
+    const modelSettings = agentModelSettings(connection.transport, connection.modelId);
     // The model only decides product facts and composition. Scheduling, generation,
     // checkpoints and correction budgets belong to the deterministic workflow.
     if (["create", "xhs"].includes(input.mode) && !cp.plan) {
@@ -538,8 +538,9 @@ async function executeRun(runId: string) {
         });
         const content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image: string; detail: "high" }> = [{ type: "input_text", text: JSON.stringify({ plan: cp.creativeVersion === 3 ? intentForDirector(commerce.data) : commerce.data, sections: cp.creativeVersion === 3 ? targets.map(({ id, kind }) => ({ id, kind })) : targets, platform: project.platform, language: input.language, userVisualDirection: cp.userVisualDirection || "No explicit user visual constraint.", recommendedDirection: cp.designDraft ? "Repair the saved draft using previousFeedback. Preserve valid sections, product information, IDs and shared seams. Submit the COMPLETE corrected storyboard." : "AI suggestions are replaceable. Design fresh staging and light appropriate to the verified product; choose whether words add information.", imageRoles, allowedStyleReferenceIds: (cp.styleReferences || []).map(r => r.id), previousDraft: cp.designDraft, previousFeedback: cp.designReview }) }, ...designImages];
         // A full 7-30-frame production storyboard is materially longer than a review.
-        // Keep a bounded deadline and zero SDK retries; no image has been requested yet.
-        await makeRunner(connection, projectId, runId, 300000).run(designer, [{ role: "user", content }], { maxTurns: 3 });
+        // Monitor logs show this single turn can exceed 300s on the relay even with
+        // reasoning low; keep the deadline generous and zero SDK retries.
+        await makeRunner(connection, projectId, runId, 600000).run(designer, [{ role: "user", content }], { maxTurns: 3 });
       }
       if (!cp.artDirection) throw new Error("ART_DIRECTION_MISSING");
     }
