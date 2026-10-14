@@ -58,3 +58,5 @@ next-env.d.ts
 /ui-review/
 /.bg-*.txt
 /scripts/*acceptance.mjs
+
+.next-run1/
