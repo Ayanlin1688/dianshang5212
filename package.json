@@ -21,7 +21,8 @@
     "prisma:generate": "node ./scripts/run-prisma-safe.cjs generate",
     "prisma:migrate": "node ./scripts/apply-prisma-migrations.cjs",
     "prisma:deploy": "node ./scripts/apply-prisma-migrations.cjs",
-    "seed:provider": "tsx ./scripts/seed-kkone-provider.ts"
+    "seed:provider": "tsx ./scripts/seed-kkone-provider.ts",
+    "sync:provider": "tsx ./scripts/sync-upstream-models.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

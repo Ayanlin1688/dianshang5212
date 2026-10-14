@@ -21,6 +21,15 @@ function isPreviewOrTest(modelId: string) {
   return /(^|[-_])(?:preview|experimental|beta|test|deprecated|legacy)(?:[-_]|$)/i.test(modelId);
 }
 
+/**
+ * 上游探活不确定（超时/限流/5xx）的模型不参与首选，
+ * 但只要还有别的候选就不会被彻底排除。
+ */
+function availabilityPenalty(model: ModelDetectionResult) {
+  const capabilities = model.capabilities as Record<string, unknown>;
+  return capabilities.__probeInconclusive ? 500 : 0;
+}
+
 function isStableImageCandidate(modelId: string) {
   return !/(preview|experimental|beta|test)/i.test(modelId);
 }
@@ -48,7 +57,7 @@ function isVisionCandidate(model: ModelDetectionResult) {
 /** 文本模型质量分层：旗舰 > 中端 > 轻量 > 带 pack/preview 后缀 */
 function scoreTextCandidate(model: ModelDetectionResult) {
   const id = model.modelId.toLowerCase();
-  let score = 0;
+  let score = -availabilityPenalty(model);
 
   if (model.capabilities.text) score += 20;
   if (model.capabilities.structured_output) score += 10;
@@ -76,13 +85,17 @@ function scoreTextCandidate(model: ModelDetectionResult) {
   return score;
 }
 
-/** 图像解析（vision）专用打分：优先明确的多模态家族 */
+/** 图像解析（vision）专用打分：优先明确的多模态家族 + 工具调用友好家族 */
 function scoreVisionCandidate(model: ModelDetectionResult) {
   const id = model.modelId.toLowerCase();
   let score = scoreTextCandidate(model);
 
-  // 明确的多模态家族（Gemini 原生多模态、vision/vl 命名）
-  if (/gemini/i.test(id)) score += 40;
+  // Agent 流程要求「图片输入 + 工具调用往返」，实测部分 Gemini 通道不支持工具调用，
+  // 因此工具调用友好的 GPT 系家族权重更高，最终仍以真实兼容性检测结果为准。
+  if (/(^|[-_])(sol|astra|codex)([-_]|$)/i.test(id) || /^gpt-/i.test(id) || /(^|[-_])o[34]([-_]|$)/i.test(id)) {
+    score += 55;
+  }
+  if (/gemini/i.test(id)) score += 25;
   if (/(vision|vl\b|multimodal|omni)/i.test(id)) score += 30;
   if (model.capabilities.vision) score += 10;
   // 纯 pack 变体不作为解析首选
@@ -94,7 +107,7 @@ function scoreVisionCandidate(model: ModelDetectionResult) {
 /** 图像模型质量分层：gpt-image 2.5 > 2 > Nano Banana Pro > 2.1 > 2 > grok */
 function scoreImageCandidate(model: ModelDetectionResult) {
   const id = model.modelId.toLowerCase();
-  let score = 0;
+  let score = -availabilityPenalty(model);
 
   if (hasRealImageGeneration(model)) score += 30;
   if (hasRealImageEdit(model)) score += 10;
@@ -115,6 +128,34 @@ function scoreImageCandidate(model: ModelDetectionResult) {
   if (isPreviewOrTest(id)) score -= 6;
 
   return score;
+}
+
+/**
+ * 按角色给出候选顺序（用于逐个做真实 Agent 兼容性检测）。
+ * 只包含上游探活可用、且能力匹配该角色的模型。
+ */
+export function rankModelCandidates(
+  models: ModelDetectionResult[],
+  role: "planning" | "analysis" | "image",
+  limit = 4,
+) {
+  const usable = models.filter((model) => model.isAvailable !== false);
+
+  if (role === "analysis") {
+    return sortByScore(usable.filter(isVisionCandidate), scoreVisionCandidate)
+      .slice(0, limit)
+      .map((model) => model.modelId);
+  }
+
+  if (role === "planning") {
+    return sortByScore(usable.filter(isTextGenerationCandidate), scoreTextCandidate)
+      .slice(0, limit)
+      .map((model) => model.modelId);
+  }
+
+  return sortByScore(usable.filter(hasRealImageEdit), scoreImageCandidate)
+    .slice(0, limit)
+    .map((model) => model.modelId);
 }
 
 export function recommendDefaultModels(models: ModelDetectionResult[]) {

@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/db/prisma";
 import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
-import { normalizeDetectedModels } from "@/lib/ai/capability-detector";
-import { recommendDefaultModels } from "@/lib/ai/model-matcher";
+import { detectModelRoles, normalizeDetectedModels } from "@/lib/ai/capability-detector";
+import { mapWithConcurrency, probeChatModel } from "@/lib/ai/model-availability";
+import { rankModelCandidates, recommendDefaultModels } from "@/lib/ai/model-matcher";
 import { encryptSecret } from "@/lib/utils/crypto";
 import { getRequestProviderCredentials, resolveEffectiveBaseUrl } from "@/lib/services/provider-runtime";
 import type {
@@ -170,6 +171,194 @@ async function replaceProviderModels(
       isDefaultImageEdit: defaults.imageEditModelId === model.modelId,
     })),
   });
+}
+
+/**
+ * 上游同步：拉取模型列表 + 真实探活 + 重排默认分配。
+ *
+ * 中转站 /v1/models 里列出但实际不可调用的模型（分组未开放、无可用账号、
+ * 未配置价格）会被标记为不可用，并从「规划模型 / 图像识别模型」候选中剔除。
+ */
+export async function syncProviderModelsFromUpstream(
+  input: ProviderConnectionInput & {
+    providerId?: string | null;
+    isActive?: boolean;
+    /** 是否做真实探活，默认开启 */
+    probe?: boolean;
+    concurrency?: number;
+    timeoutMs?: number;
+  },
+) {
+  const baseUrl = resolveEffectiveBaseUrl(input.baseUrl);
+  const adapter = new OpenAICompatibleAdapter(baseUrl, input.apiKey);
+  const rawModels = await adapter.listModels();
+  const normalized = enrichModelEndpointSupport(
+    normalizeDetectedModels(mergeDiscoveredModels(baseUrl, rawModels)),
+  );
+
+  const probeEnabled = input.probe !== false;
+  const chatCandidates = normalized.filter(
+    (model) =>
+      (model.capabilities.text || model.capabilities.vision) &&
+      !model.capabilities.image_gen &&
+      !model.capabilities.image_edit,
+  );
+
+  const probeResults = probeEnabled
+    ? await mapWithConcurrency(chatCandidates, input.concurrency ?? 4, (model) =>
+        probeChatModel({
+          baseUrl,
+          apiKey: input.apiKey,
+          modelId: model.modelId,
+          timeoutMs: input.timeoutMs,
+          checkVision: true,
+        }),
+      )
+    : [];
+
+  const probeByModelId = new Map(probeResults.map((result) => [result.modelId, result]));
+
+  const withAvailability = normalized.map((model) => {
+    const probe = probeByModelId.get(model.modelId);
+    if (!probe) {
+      return model;
+    }
+
+    const capabilities = { ...(model.capabilities as Record<string, unknown>) };
+
+    if (!probe.ok) {
+      // 超时 / 限流 / 5xx 属「探测不确定」，不能据此判定模型永久不可用
+      if (probe.status === "unavailable") {
+        capabilities.__unavailableReason = probe.reason;
+        delete capabilities.__probeInconclusive;
+        return {
+          ...model,
+          capabilities: capabilities as CapabilityMap,
+          isAvailable: false,
+        };
+      }
+
+      capabilities.__probeInconclusive = probe.reason ?? "探测不确定";
+      return {
+        ...model,
+        capabilities: capabilities as CapabilityMap,
+        isAvailable: true,
+      };
+    }
+
+    delete capabilities.__unavailableReason;
+    delete capabilities.__probeInconclusive;
+    capabilities.__probeLatencyMs = probe.latencyMs;
+
+    // 只有带图探活真正通过才保留视觉能力，避免把纯文本模型放进「图像识别」
+    const nextCapabilities = {
+      ...capabilities,
+      vision: probe.supportsVision,
+      text: true,
+      structured_output: true,
+    } as CapabilityMap;
+
+    return {
+      ...model,
+      capabilities: nextCapabilities,
+      roles: detectModelRoles(nextCapabilities),
+      isAvailable: true,
+    };
+  });
+
+  const recommendations = recommendDefaultModels(withAvailability);
+
+  // 已有默认值仍然可用且能力匹配时保留，否则回落到推荐值
+  let defaults: {
+    analysisModelId?: string | null;
+    planningModelId?: string | null;
+    heroImageModelId?: string | null;
+    detailImageModelId?: string | null;
+    imageEditModelId?: string | null;
+  } = { ...recommendations };
+
+  if (input.providerId) {
+    const existing = await prisma.modelProfile.findMany({
+      where: { providerConfigId: input.providerId },
+      select: {
+        modelId: true,
+        isDefaultAnalysis: true,
+        isDefaultPlanning: true,
+        isDefaultHeroImage: true,
+        isDefaultDetailImage: true,
+        isDefaultImageEdit: true,
+      },
+    });
+    const available = new Map(withAvailability.map((model) => [model.modelId, model]));
+    const keep = (flag: keyof (typeof existing)[number]) =>
+      existing.find((item) => item[flag] === true)?.["modelId"] ?? null;
+    const keepIfUsable = (value: string | null, requirement: (m: (typeof withAvailability)[number]) => boolean) => {
+      if (!value) return null;
+      const model = available.get(value);
+      if (!model || model.isAvailable === false || !requirement(model)) return null;
+      return value;
+    };
+
+    defaults = {
+      analysisModelId:
+        keepIfUsable(keep("isDefaultAnalysis"), (m) => Boolean(m.capabilities.vision)) ??
+        recommendations.analysisModelId,
+      planningModelId:
+        keepIfUsable(keep("isDefaultPlanning"), (m) => Boolean(m.capabilities.text)) ??
+        recommendations.planningModelId,
+      heroImageModelId:
+        keepIfUsable(keep("isDefaultHeroImage"), (m) => Boolean(m.capabilities.image_gen)) ??
+        recommendations.heroImageModelId,
+      detailImageModelId:
+        keepIfUsable(keep("isDefaultDetailImage"), (m) => Boolean(m.capabilities.image_gen)) ??
+        recommendations.detailImageModelId,
+      imageEditModelId:
+        keepIfUsable(keep("isDefaultImageEdit"), (m) => Boolean(m.capabilities.image_edit)) ??
+        recommendations.imageEditModelId,
+    };
+  }
+
+  const providerId =
+    input.providerId ??
+    (await saveProviderConfig({
+      name: input.name,
+      baseUrl,
+      apiKey: input.apiKey,
+      isActive: input.isActive ?? true,
+      discoveredModels: withAvailability,
+      defaultAssignments: defaults,
+    }));
+
+  if (input.providerId) {
+    await replaceProviderModels(providerId, withAvailability, defaults);
+  }
+
+  const available = withAvailability.filter((model) => model.isAvailable !== false);
+  const unavailable = withAvailability.filter((model) => model.isAvailable === false);
+  const inconclusive = available.filter(
+    (model) => Boolean((model.capabilities as Record<string, unknown>).__probeInconclusive),
+  );
+
+  return {
+    providerId,
+    baseUrl,
+    probed: probeResults.length,
+    totalModels: withAvailability.length,
+    availableCount: available.length - inconclusive.length,
+    unavailable: unavailable.map((model) => ({
+      modelId: model.modelId,
+      reason: String((model.capabilities as Record<string, unknown>).__unavailableReason ?? "不可用"),
+    })),
+    inconclusive: inconclusive.map((model) => ({
+      modelId: model.modelId,
+      reason: String((model.capabilities as Record<string, unknown>).__probeInconclusive ?? "探测不确定"),
+    })),
+    candidates: {
+      planning: rankModelCandidates(withAvailability, "planning"),
+      analysis: rankModelCandidates(withAvailability, "analysis"),
+    },
+    defaults,
+  };
 }
 
 export async function testProviderConnection(input: ProviderConnectionInput) {

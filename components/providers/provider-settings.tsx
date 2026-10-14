@@ -5,7 +5,7 @@ import { Select } from "@/components/ui/select";
 
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronsUpDown, CopyPlus, History, Loader2, LockKeyhole, PlugZap, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronsUpDown, CopyPlus, History, Loader2, LockKeyhole, PlugZap, RefreshCw, Trash2 } from "lucide-react";
 
 import { CLIENT_PROVIDER_STORAGE_KEY } from "@/components/layout/provider-credential-fetch-bridge";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
@@ -186,6 +186,16 @@ function getModelsForType(models: GenericModelRecord[], typeKey: ModelTypeKey) {
   });
 }
 
+/** 上游同步后标记为不可用的模型（探活失败：分组未开放 / 无可用账号 / 未定价等） */
+function isModelUnavailable(model: GenericModelRecord) {
+  return model.isAvailable === false;
+}
+
+function modelUnavailableReason(model: GenericModelRecord) {
+  const reason = model.capabilities?.__unavailableReason;
+  return typeof reason === "string" && reason ? reason : "上游不可用";
+}
+
 function buildDefaults(provider: ProviderRecord | null): DefaultAssignments {
   return {
     analysisModelId: provider?.models.find((item) => item.isDefaultAnalysis)?.modelId ?? "",
@@ -278,7 +288,7 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
     () => providers.find((item) => item.id === selectedProviderId) ?? activeProvider,
     [providers, selectedProviderId, activeProvider],
   );
-  const [loading, setLoading] = useState<null | "configure" | "saveAsNew" | "activate" | "delete">(null);
+  const [loading, setLoading] = useState<null | "configure" | "saveAsNew" | "activate" | "delete" | "sync">(null);
   const [deleteTargetId, setDeleteTargetId] = useState("");
   const [models, setModels] = useState<Array<GenericModelRecord>>(selectedProvider?.models ?? []);
   const [defaults, setDefaults] = useState<DefaultAssignments>(buildDefaults(selectedProvider ?? null));
@@ -491,6 +501,61 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
     }
   }
 
+  async function reloadProviders(nextSelectedId?: string | null) {
+    const response = await fetch("/api/providers");
+    const payload = await response.json();
+    if (payload.success) {
+      hydrateFromProviderPayload(payload.data, nextSelectedId);
+    }
+  }
+
+  /**
+   * 与上游拉取同步：重新拉取中转站模型 → 真实探活 → 剔除不可用模型 →
+   * 逐个做 Agent 兼容性验证后重设规划/图像识别默认模型。
+   */
+  async function handleSyncUpstream() {
+    setLoading("sync");
+    setConnectionMessage("");
+    setConnectionInfo({});
+    try {
+      const values = persistCurrentCredentials();
+      const response = await fetch("/api/providers/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: values.name, baseUrl: values.baseUrl, apiKey: values.apiKey }),
+      });
+      const payload = await response.json();
+      if (!payload.success) throw new Error(payload.error?.message ?? "与上游同步失败");
+
+      const data = payload.data as {
+        providerId: string;
+        totalModels: number;
+        availableCount: number;
+        unavailable: Array<{ modelId: string; reason: string }>;
+        tuning?: Array<{ role: string; modelId: string | null }>;
+        defaults: Record<string, string | null>;
+      };
+
+      await reloadProviders(data.providerId);
+
+      const planning = data.tuning?.find((item) => item.role === "planning")?.modelId ?? data.defaults.planningModelId;
+      const analysis = data.tuning?.find((item) => item.role === "analysis")?.modelId ?? data.defaults.analysisModelId;
+
+      setConnectionStatus("success");
+      setConnectionInfo({ modelCount: data.availableCount });
+      setConnectionMessage(
+        `与上游同步完成：可用 ${data.availableCount}/${data.totalModels} 个模型，剔除不可用 ${data.unavailable.length} 个`,
+      );
+      toast.success(`同步完成｜规划模型 ${planning ?? "未找到"}｜图像识别模型 ${analysis ?? "未找到"}`);
+    } catch (error) {
+      setConnectionStatus("failed");
+      setConnectionMessage(error instanceof Error ? error.message : "与上游同步失败");
+      toast.error(error instanceof Error ? error.message : "与上游同步失败");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   async function saveProviderAsNew() {
     setLoading("saveAsNew");
     try {
@@ -674,11 +739,20 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-3">
               <p className="text-xs text-muted-foreground">需要保留当前历史服务时，可先一键配置确认模型，再另存为新服务。</p>
-              <Button type="button" variant="outline" onClick={saveProviderAsNew} disabled={loading !== null || models.length === 0 || !form.apiKey.trim()}>
-                {loading === "saveAsNew" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CopyPlus className="mr-2 h-4 w-4" />}
-                另存为新服务
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" variant="outline" onClick={handleSyncUpstream} disabled={loading !== null || !form.apiKey.trim()}>
+                  {loading === "sync" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                  {loading === "sync" ? "正在与上游同步..." : "与上游同步"}
+                </Button>
+                <Button type="button" variant="outline" onClick={saveProviderAsNew} disabled={loading !== null || models.length === 0 || !form.apiKey.trim()}>
+                  {loading === "saveAsNew" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CopyPlus className="mr-2 h-4 w-4" />}
+                  另存为新服务
+                </Button>
+              </div>
             </div>
+            <p className="text-xs leading-6 text-muted-foreground">
+              与上游同步会重新拉取上游模型列表、逐个真实探活并剔除不可用模型，然后调用规划/图像识别模型做兼容性验证再落库（耗时约 1-3 分钟）。
+            </p>
           </div>
 
           {models.length > 0 ? (
@@ -693,15 +767,21 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
 
               <div className="grid gap-4 md:grid-cols-2">
                 {modelTypeFields.map((field) => {
-                  const options = getModelsForType(models, field.key);
+                  const allOptions = getModelsForType(models, field.key);
+                  // 上游同步标记为不可用的模型不再出现在默认下拉框中（当前选中值除外，避免显示丢失）
                   const selectedValue = getTypeDefaultValue(defaults, field.key);
+                  const options = allOptions.filter(
+                    (model) => !isModelUnavailable(model) || model.modelId === selectedValue,
+                  );
                   return (
                     <div key={field.key} className="space-y-2">
                       <Label>{field.label}</Label>
                       <Select aria-label={field.label} value={selectedValue} disabled={options.length === 0} onValueChange={(value) => setDefaults((current) => setTypeDefaultValue(current, field.key, value))}>
                         <option value="">{options.length === 0 ? "暂无此类型模型" : "未选择"}</option>
                         {options.map((model) => (
-                          <option key={`${field.key}-${model.modelId}`} value={model.modelId}>{model.label}</option>
+                          <option key={`${field.key}-${model.modelId}`} value={model.modelId}>
+                            {isModelUnavailable(model) ? `${model.label}（不可用）` : model.label}
+                          </option>
                         ))}
                       </Select>
                     </div>
@@ -734,7 +814,17 @@ export function ProviderSettings({ initialProviders, runtimeConfig }: ProviderSe
                     </div>
                     <div className="mt-4 flex flex-wrap gap-2">
                       {visibleModels.map((model) => (
-                        <Badge key={`${group.key}-${model.modelId}`} variant="outline" className="max-w-full truncate">{model.label}</Badge>
+                        <Badge
+                          key={`${group.key}-${model.modelId}`}
+                          variant="outline"
+                          className={
+                            "max-w-full truncate " +
+                            (isModelUnavailable(model) ? "border-red-300 bg-red-50 text-red-600 line-through dark:border-red-900 dark:bg-red-950/40 dark:text-red-400" : "")
+                          }
+                          title={isModelUnavailable(model) ? modelUnavailableReason(model) : undefined}
+                        >
+                          {isModelUnavailable(model) ? `${model.label} · 不可用` : model.label}
+                        </Badge>
                       ))}
                       {hiddenCount > 0 ? <Badge>+ {hiddenCount} 个</Badge> : null}
                     </div>

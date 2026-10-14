@@ -37,7 +37,8 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts",
     "**/*.cts",
-    ".next-desktop/types/**/*.ts"
+    ".next-desktop/types/**/*.ts",
+    ".next-run1/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
