@@ -11,6 +11,18 @@ import { networkErrorCode } from "@/lib/utils/network-error";
 export type AgentConnection = { apiKey: string; baseUrl: string; modelId: string; transport: "responses" | "chat" };
 const cache = new Map<string, { expires: number; connection: Omit<AgentConnection, "apiKey"> }>();
 
+// Abort reasons are DOMExceptions (AbortError / TimeoutError), which are not
+// Error instances, so name checks must not rely on instanceof.
+function errorName(error: unknown) {
+  const name = (error as { name?: unknown })?.name;
+  return typeof name === "string" ? name : "";
+}
+
+function isTimeoutError(error: unknown) {
+  const name = errorName(error);
+  return name === "AbortError" || name === "TimeoutError" || name === "ConnectTimeoutError";
+}
+
 function describeFailure(error: unknown) {
   const value = error as { status?: number; name?: string; message?: string; cause?: { code?: string } };
   const message = value?.message || "";
@@ -34,18 +46,26 @@ function describeFailure(error: unknown) {
 }
 
 export function makeRunner(connection: AgentConnection, projectId?: string, runId?: string, requestTimeoutMs = 90000) {
+  // The SDK races its own timeout timer against the request promise, so a slow
+  // gateway makes the SDK reject before an in-fetch retry can answer. Keep the
+  // SDK ceiling out of the way and enforce the real budget per attempt below.
+  const clientTimeoutMs = Math.max(requestTimeoutMs * 3, 600000);
   const client = new OpenAI({
-    apiKey: connection.apiKey, baseURL: connection.baseUrl, maxRetries: 0, timeout: requestTimeoutMs,
+    apiKey: connection.apiKey, baseURL: connection.baseUrl, maxRetries: 0, timeout: clientTimeoutMs,
     fetch: async (url, init) => {
       // Retry only this model HTTP request, before the SDK receives tool calls.
       // Never replay Runner.run or image generation. Brief preparation already
       // owns its read-only retry, so calls without a run ID remain single-shot.
       for (let attempt = 0; ; attempt++) {
         const started = Date.now();
+        // Every attempt owns a fresh budget. A caller abort must still win, so
+        // combine it with the per-attempt deadline instead of replacing it.
+        const deadline = AbortSignal.timeout(requestTimeoutMs);
+        const requestInit: RequestInit | undefined = init ? { ...init, signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline } : undefined;
         let response: Response;
         let body: string;
         try {
-          response = await fetch(url, init);
+          response = await fetch(url, requestInit);
           // A gateway can disconnect after headers arrive, while reading the body.
           body = await response.clone().text();
         } catch (error) {
@@ -54,11 +74,15 @@ export function makeRunner(connection: AgentConnection, projectId?: string, runI
             model: connection.modelId, projectId, runId, operation: runId ? "detail_agent" : projectId ? "product_analysis" : "agent_compatibility",
             category: "chat", statusCode: 0, durationMs: Date.now() - started, success: false,
             requestBytes: typeof init?.body === "string" ? Buffer.byteLength(init.body) : 0,
-            responseBytes: 0, responseBody: "", errorMessage: `Network request failed (${networkErrorCode(error) || "NETWORK_ERROR"})`,
+            responseBytes: 0, responseBody: "", errorMessage: `Network request failed (${networkErrorCode(error) || (isTimeoutError(error) ? "REQUEST_TIMEOUT" : "NETWORK_ERROR")})`,
           }).catch(() => undefined);
-          const transient = ["ECONNRESET", "UND_ERR_SOCKET", "EAI_AGAIN", "ECONNREFUSED"].includes(networkErrorCode(error) || "");
-          if (runId && attempt === 0 && transient && !init?.signal?.aborted) {
-            await delay(750, undefined, { signal: init?.signal ?? undefined });
+          const code = networkErrorCode(error) || "";
+          const timedOut = isTimeoutError(error) || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT";
+          const transient = ["ECONNRESET", "UND_ERR_SOCKET", "EAI_AGAIN", "ECONNREFUSED"].includes(code);
+          // Relay gateways often hang once and answer the retry. Replay only
+          // this single model HTTP request, never Runner.run or image generation.
+          if (runId && attempt === 0 && !init?.signal?.aborted && (transient || timedOut)) {
+            await delay(750).catch(() => undefined);
             continue;
           }
           throw error;
@@ -73,7 +97,7 @@ export function makeRunner(connection: AgentConnection, projectId?: string, runI
         }).catch(() => undefined);
         if (runId && attempt === 0 && [500, 502, 503, 504].includes(response.status) && !init?.signal?.aborted) {
           await response.body?.cancel().catch(() => undefined);
-          await delay(750, undefined, { signal: init?.signal ?? undefined });
+          await delay(750).catch(() => undefined);
           continue;
         }
         return response;
@@ -153,7 +177,9 @@ export async function resolveAgentConnection(force = false, role: "planning" | "
         modelSettings: { parallelToolCalls: false, store: false, ...(connection.transport === "chat" && /^gpt-6-(luna|sol)(?:-|$)/.test(connection.modelId) ? { reasoning: { effort: "none" as const } } : {}) },
         instructions: role === "analysis" ? "Inspect the user's image and call verify_image once with its solid color (red/blue/green)." : "First inspect the user's image and call verify_image with its color. Then inspect the NEW image returned by that tool, which differs from the original. Call verify_result with the exact token returned by verify_image and the NEW image's color (red/blue/green). Submit through tools, not a prose reply.",
       });
-      await makeRunner(connection).run(agent, [{ role: "user", content: [{ type: "input_text", text: "Verify this image using the requested tools." }, { type: "input_image", image: sourceImage, detail: role === "analysis" ? "high" : "low" }] }], { maxTurns: 3 });
+      // The relay answers even trivial requests in 50s+; the 90s default
+      // misclassified a healthy model as timing out.
+      await makeRunner(connection, undefined, undefined, 150000).run(agent, [{ role: "user", content: [{ type: "input_text", text: "Verify this image using the requested tools." }, { type: "input_image", image: sourceImage, detail: role === "analysis" ? "high" : "low" }] }], { maxTurns: 3 });
       if (!invoked) throw new Error("TOOL_NOT_CALLED");
       if (role === "planning" && !resultVerified) throw new Error("RESULT_NOT_SUBMITTED");
       cache.set(hash, { expires: Date.now() + 600000, connection: { baseUrl, modelId, transport } });

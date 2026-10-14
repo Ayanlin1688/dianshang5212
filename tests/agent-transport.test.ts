@@ -7,16 +7,19 @@ import path from "node:path";
 import { Agent, tool } from "@openai/agents";
 import { z } from "zod";
 
-test("Agent model requests recover once without replaying tools", { timeout: 30000 }, async t => {
+test("Agent model requests recover once without replaying tools", { timeout: 60000 }, async t => {
   process.env.STORAGE_ROOT = await mkdtemp(path.join(tmpdir(), "mxpage-transport-test-"));
   const { makeRunner } = await import("../lib/detail-runs/provider");
   const { describeRunFailure } = await import("../lib/detail-runs/run-errors");
-  let calls = 0, executed = 0, mode: "socket" | "body" | "persistent" | number = "socket";
+  let calls = 0, executed = 0, mode: "socket" | "body" | "persistent" | "hang" | "persistent-hang" | number = "socket";
   const requests: string[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     calls++; requests.push(Buffer.concat(chunks).toString());
+    // A relay gateway that accepts the request and never answers.
+    if (mode === "hang" && calls === 1) return;
+    if (mode === "persistent-hang") return;
     if (mode === "persistent" || mode === "socket" && calls === 1) { response.destroy(); return; }
     if (mode === "body" && calls === 1) {
       response.writeHead(200, { "Content-Type": "application/json", "Content-Length": "10000" });
@@ -55,6 +58,16 @@ test("Agent model requests recover once without replaying tools", { timeout: 300
     for (const status of [400, 401, 403, 429]) await t.test(`HTTP ${status} is not retried`, async () => {
       reset(status); await assert.rejects(() => run("responses"));
       assert.equal(calls, 1); assert.equal(executed, 0);
+    });
+    await t.test("gateway hangs are retried once for a run request", async () => {
+      reset("hang");
+      await makeRunner({ baseUrl, apiKey: "fixture", modelId: "fixture", transport: "responses" }, undefined, "fixture-run", 600).run(agent, "submit", { maxTurns: 2 });
+      assert.equal(calls, 2); assert.equal(executed, 1);
+    });
+    await t.test("a persistent gateway hang fails as a timeout instead of hanging forever", async () => {
+      reset("persistent-hang");
+      await assert.rejects(() => makeRunner({ baseUrl, apiKey: "fixture", modelId: "fixture", transport: "responses" }, undefined, "fixture-run", 600).run(agent, "submit", { maxTurns: 2 }), error => describeRunFailure(error, "planning").code === "PROVIDER_TIMEOUT");
+      assert.equal(calls, 2); assert.equal(executed, 0);
     });
     await t.test("preparation retains its existing outer retry budget", async () => {
       reset("socket");

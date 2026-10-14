@@ -64,12 +64,14 @@ Keep unknown specifications out of the description. Do not infer hidden ports, t
   const images: ImageContent[] = [];
   let mainImage: Buffer | undefined;
   for (const asset of project.assets.slice(0, 8)) {
-    const bytes = await sharp(await readStorageFile(asset.filePath)).rotate().resize({ width: 2048, height: 2048, fit: "inside", withoutEnlargement: true }).png().toBuffer();
+    // JPEG keeps vision quality while cutting upload payloads ~10x versus PNG;
+    // PNG made recognition requests slow enough to hit gateway timeouts.
+    const bytes = await sharp(await readStorageFile(asset.filePath)).rotate().resize({ width: 2048, height: 2048, fit: "inside", withoutEnlargement: true }).jpeg({ quality: 88 }).toBuffer();
     mainImage ??= bytes;
-    images.push({ type: "input_image", image: `data:image/png;base64,${bytes.toString("base64")}`, detail: "high" });
+    images.push({ type: "input_image", image: `data:image/jpeg;base64,${bytes.toString("base64")}`, detail: "high" });
   }
   if (!brief) {
-    await runBriefStep("识别", () => makeRunner(connection, projectId).run(agent, [{ role: "user", content: [{ type: "input_text", text: JSON.stringify({ description: project.description }) }, ...images] }], { maxTurns: 3 }));
+    await runBriefStep("识别", () => makeRunner(connection, projectId, undefined, 240000).run(agent, [{ role: "user", content: [{ type: "input_text", text: JSON.stringify({ description: project.description }) }, ...images] }], { maxTurns: 3 }));
   }
   if (!brief) throw new Error("Agent 未返回有效分析，请重试。");
   // Commit successful recognition before the next network request. The draft
@@ -83,8 +85,8 @@ Keep unknown specifications out of the description. Do not infer hidden ports, t
   const cropWidth = Math.ceil(width * 0.65), cropHeight = Math.ceil(height * 0.65);
   const details: ImageContent[] = [];
   for (const [left, top] of [[0, 0], [width - cropWidth, 0], [0, height - cropHeight], [width - cropWidth, height - cropHeight]]) {
-    const bytes = await sharp(mainImage!).extract({ left, top, width: cropWidth, height: cropHeight }).resize({ width: 1024, height: 1024, fit: "inside" }).png().toBuffer();
-    details.push({ type: "input_image", image: `data:image/png;base64,${bytes.toString("base64")}`, detail: "high" });
+    const bytes = await sharp(mainImage!).extract({ left, top, width: cropWidth, height: cropHeight }).resize({ width: 1024, height: 1024, fit: "inside" }).jpeg({ quality: 88 }).toBuffer();
+    details.push({ type: "input_image", image: `data:image/jpeg;base64,${bytes.toString("base64")}`, detail: "high" });
   }
   let reviewed: z.infer<typeof reviewSchema> | undefined;
   const submitReview = tool({ name: "submit_brief_review", description: "Save the complete corrected product brief after inspecting original images and detail views. Record factual corrections, not hidden reasoning.", parameters: reviewSchema, errorFunction: null,
@@ -95,7 +97,7 @@ Original photos come first. The last four images are overlapping enlarged views 
 ${productIdentityGuide}
 Re-read every visible numeral and unit directly from the images BEFORE comparing with the draft. Check printed letters, number shapes, ports and plug pins. Correct misread facts in the name and description. Do not preserve a draft number merely because it looks plausible. If the pixels do not support a unique reading, omit it from product fields and flag it in uncertainties; do not put conflicting candidates into the description.
 The name must be a short product category, without an unverified brand, numerical specification or total port count. Describe visible printed labels as labels, not verified performance. Distinguish visible port openings from total ports; do not infer materials, protocols, region compatibility, certifications or hidden features. Ensure name, description, category and uncertainties do not contradict each other. Use corrections for concise FACTUAL changes only. You have NO authority over creative direction: never require the original background, prohibit new sets/props/light, or prescribe minimalist composition. Do not write advertising copy or generate images.` });
-  await runBriefStep("复核", () => makeRunner(connection, projectId).run(reviewer, [{ role: "user", content: [{ type: "input_text", text: JSON.stringify({ draft: brief, suppliedDescription: project.description, originalImageCount: images.length }) }, ...images, ...details] }], { maxTurns: 3 }));
+  await runBriefStep("复核", () => makeRunner(connection, projectId, undefined, 240000).run(reviewer, [{ role: "user", content: [{ type: "input_text", text: JSON.stringify({ draft: brief, suppliedDescription: project.description, originalImageCount: images.length }) }, ...images, ...details] }], { maxTurns: 3 }));
   if (!reviewed) throw new Error("图像复核未完成，未保存未经复核的预填结果，请重试。");
   const { corrections, ...finalBrief } = reviewed;
   const recommendedVisualDirection = categoryProfiles[finalBrief.category].art;
