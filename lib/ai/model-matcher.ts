@@ -22,6 +22,15 @@ function isPreviewOrTest(modelId: string) {
 }
 
 /**
+ * 中转站的 Gemini 通道实测不支持工具调用往返（Agent 兼容检测：
+ * /responses 报「超过允许的调用轮次」、/chat 报「未调用要求的工具」，必挂），
+ * 因此 Gemini 系不作为规划/图像识别首选；仅在没有其他可用家族时兜底。
+ */
+export function isToolCallRiskModel(modelId: string) {
+  return /gemini/i.test(modelId);
+}
+
+/**
  * 上游探活不确定（超时/限流/5xx）的模型不参与首选，
  * 但只要还有别的候选就不会被彻底排除。
  */
@@ -78,6 +87,7 @@ function scoreTextCandidate(model: ModelDetectionResult) {
   if (generation) score += Math.min(parseFloat(generation[1]), 9);
 
   // 降权项
+  if (isToolCallRiskModel(id)) score -= 60;
   if (/pack(?:[-_]|$)/i.test(id)) score -= 25;
   if (isPreviewOrTest(id)) score -= 6;
   if (/(embedding|rerank|moderation|whisper|tts|speech|transcrib|audio|video)/i.test(id)) score -= 40;
@@ -95,7 +105,6 @@ function scoreVisionCandidate(model: ModelDetectionResult) {
   if (/(^|[-_])(sol|astra|codex)([-_]|$)/i.test(id) || /^gpt-/i.test(id) || /(^|[-_])o[34]([-_]|$)/i.test(id)) {
     score += 55;
   }
-  if (/gemini/i.test(id)) score += 25;
   if (/(vision|vl\b|multimodal|omni)/i.test(id)) score += 30;
   if (model.capabilities.vision) score += 10;
   // 纯 pack 变体不作为解析首选
@@ -171,14 +180,20 @@ export function recommendDefaultModels(models: ModelDetectionResult[]) {
   );
   const imageEditModels = models.filter((item) => hasRealImageEdit(item));
 
+  // Agent 角色优先选工具调用安全的家族；只有当安全家族完全缺席时才退回全量候选。
+  const preferToolSafe = (list: ModelDetectionResult[]) => {
+    const safe = list.filter((model) => !isToolCallRiskModel(model.modelId));
+    return safe.length ? safe : list;
+  };
+
   const analysisModel =
-    sortByScore(visionModels, scoreVisionCandidate)[0] ??
+    sortByScore(preferToolSafe(visionModels), scoreVisionCandidate)[0] ??
     sortByScore(textModels, scoreTextCandidate)[0] ??
     null;
 
   const planningModel =
-    sortByScore(textModels.filter((item) => item.capabilities.structured_output), scoreTextCandidate)[0] ??
-    sortByScore(textModels, scoreTextCandidate)[0] ??
+    sortByScore(preferToolSafe(textModels.filter((item) => item.capabilities.structured_output)), scoreTextCandidate)[0] ??
+    sortByScore(preferToolSafe(textModels), scoreTextCandidate)[0] ??
     null;
 
   const heroImageModel =

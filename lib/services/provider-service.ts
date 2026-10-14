@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db/prisma";
 import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
 import { detectModelRoles, normalizeDetectedModels } from "@/lib/ai/capability-detector";
 import { mapWithConcurrency, probeChatModel } from "@/lib/ai/model-availability";
-import { rankModelCandidates, recommendDefaultModels } from "@/lib/ai/model-matcher";
+import { isToolCallRiskModel, rankModelCandidates, recommendDefaultModels } from "@/lib/ai/model-matcher";
 import { encryptSecret } from "@/lib/utils/crypto";
 import { getRequestProviderCredentials, resolveEffectiveBaseUrl } from "@/lib/services/provider-runtime";
 import type {
@@ -300,11 +300,13 @@ export async function syncProviderModelsFromUpstream(
     };
 
     defaults = {
+      // 规划/识别两个 Agent 角色额外要求工具调用安全：Gemini 通道实测不支持
+      // 工具往返，即使探活通过也不能保留为默认（见 model-matcher.isToolCallRiskModel）。
       analysisModelId:
-        keepIfUsable(keep("isDefaultAnalysis"), (m) => Boolean(m.capabilities.vision)) ??
+        keepIfUsable(keep("isDefaultAnalysis"), (m) => Boolean(m.capabilities.vision) && !isToolCallRiskModel(m.modelId)) ??
         recommendations.analysisModelId,
       planningModelId:
-        keepIfUsable(keep("isDefaultPlanning"), (m) => Boolean(m.capabilities.text)) ??
+        keepIfUsable(keep("isDefaultPlanning"), (m) => Boolean(m.capabilities.text) && !isToolCallRiskModel(m.modelId)) ??
         recommendations.planningModelId,
       heroImageModelId:
         keepIfUsable(keep("isDefaultHeroImage"), (m) => Boolean(m.capabilities.image_gen)) ??
