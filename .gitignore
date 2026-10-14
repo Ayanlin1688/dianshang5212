@@ -60,4 +60,5 @@ next-env.d.ts
 /scripts/*acceptance.mjs
 
 .next-run1/
+.next-run*/
 tmp-e2e-ref.png
