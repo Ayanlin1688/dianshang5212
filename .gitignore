@@ -62,3 +62,9 @@ next-env.d.ts
 .next-run1/
 .next-run*/
 tmp-e2e-ref.png
+
+# GitHub 实时同步工具（本机状态与日志，不入库）
+/.github-sync.json
+/.github-sync.lock
+/.sync-watch.lock
+/logs/
