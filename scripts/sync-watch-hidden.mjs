@@ -2,11 +2,13 @@
 /**
  * 以「无控制台窗口」的方式在后台启动实时同步守护进程。
  *
- * 由登录计划任务「MxPage-GitHub-Sync」调用：
+ * 供需要「无窗口后台常驻」的场景手动启动，或在启动文件夹 / 计划任务中调用：
  * 本进程只负责把 scripts/sync-watch.mjs 派生为一个脱离的、隐藏窗口的子进程，
- * 随后立即退出，因此计划任务本身不会长时间占用进程。
+ * 随后立即退出，因此调用方不会长时间占用进程。
  *
- * 手动启动亦可：node scripts/sync-watch-hidden.mjs
+ * 本机日常自启由用户启动文件夹中的 MxPage-GitHub-Sync.vbs 负责。
+ *
+ * 手动启动：node scripts/sync-watch-hidden.mjs
  */
 
 import { spawn } from "node:child_process";
