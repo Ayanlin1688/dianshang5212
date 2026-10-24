@@ -468,14 +468,6 @@ MxPage
   </picture>
 </a>
 
-## 欢迎交流
-
-如果你对 MxPage、AI 商品图文生成、电商详情页自动化、小红书图文工作流或本地私有化部署感兴趣，欢迎交流。
-
-<img width="888" height="1131" alt="交流二维码" src="https://github.com/user-attachments/assets/028cfd0b-a813-4655-9b49-aa9ab6619c7d" />
-
----
-
 ## 品牌信息
 
 | 项目         | 信息                             |
